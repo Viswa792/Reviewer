@@ -1,4 +1,4 @@
-# app.py (Final Production Version - Improved Prompt and Resilience)
+# app.py (Golden Master Version - Complete and Verified)
 import json
 import os
 import requests
@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 # --- CONFIGURATION & MODELS ---
 load_dotenv()
+# Using the correct, publicly available model names for best results.
 REVIEW_MODELS = ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-1.5-flash-latest"]
 VALIDATION_MODEL = "gemini-1.5-pro-latest"
 RATE_LIMIT = 5
@@ -58,8 +59,8 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     time.sleep(RATE_LIMIT)
     safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
     generation_config = genai.types.GenerationConfig(
-        temperature=0.2, 
-        max_output_tokens=8192, 
+        temperature=0.2,
+        max_output_tokens=8192,
         response_mime_type="application/json"
     )
     model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
@@ -105,10 +106,8 @@ def extract_json_from_response(response_text):
     raise ValueError(f"JSON Parsing Failed. The model returned conversational text instead of JSON. Raw Text: {response_text}")
 
 # --- PROMPT ENGINEERING & REPORTING ---
-
-# --- 1. THE NEW, IMPROVED PROMPT ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
-    """Builds a heavily revised prompt with strong instructions and few-shot examples."""
+    # This is the new, heavily revised prompt with strong instructions and few-shot examples.
     return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a single, specific guideline.
 Your response MUST be a single, valid JSON object and NOTHING ELSE. Do not include conversational text, apologies, or any text outside the final JSON object.
 

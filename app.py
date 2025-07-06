@@ -1,6 +1,4 @@
-# app.py (Golden Master Version - Using User-Specified Original Models)
-# Final version as of Monday, July 8, 2024.
-# Added fix for parallel execution race condition.
+
 import json
 import os
 import requests
@@ -11,12 +9,12 @@ import traceback
 import zipfile
 import google.generativeai as genai
 import streamlit as st
-import tempfile # --- FIX FOR PARALLEL RUNS ---
+import tempfile 
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-# --- CONFIGURATION & MODELS (REVERTED TO YOUR ORIGINAL SPECIFICATION) ---
+# --- CONFIGURATION & MODELS ---
 load_dotenv()
 REVIEW_MODELS = [
     "gemini-2.5-pro",
@@ -62,7 +60,7 @@ def find_and_unzip(zip_path, extract_folder):
                 return os.path.join(root, file)
     raise FileNotFoundError(f"No .ipynb file found in the extracted content of {zip_path}")
 
-# --- API CALL FUNCTION (RESTORED TO YOUR ORIGINAL LOGIC) ---
+# --- API CALL FUNCTION ---
 def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     """
     Calls the Google Gemini API, using JSON Mode CONDITIONALLY for supported models.
@@ -75,7 +73,6 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
         'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
     }
 
-    # Conditional JSON Mode, as in your original script
     if "flash" in model:
         generation_config = genai.types.GenerationConfig(
             temperature=0.2,
@@ -138,7 +135,6 @@ def extract_json_from_response(response_text):
 
 # --- PROMPT ENGINEERING & REPORTING ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
-    # This is the new, heavily revised prompt with strong instructions and few-shot examples.
     return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a single, specific guideline.
 Your response MUST be a single, valid JSON object and NOTHING ELSE. Do not include conversational text, apologies, or any text outside the final JSON object.
 

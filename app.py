@@ -1,4 +1,4 @@
-# app.py (Golden Master Version - Complete and Verified)
+# app.py (Golden Master Version - Using User-Specified Original Models)
 # Final version as of Monday, July 8, 2024.
 import json
 import os
@@ -14,11 +14,15 @@ from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-# --- CONFIGURATION & MODELS ---
+# --- CONFIGURATION & MODELS (REVERTED TO YOUR ORIGINAL SPECIFICATION) ---
 load_dotenv()
-# Using the correct, publicly available model names for best results.
-REVIEW_MODELS = ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-1.5-flash-latest"]
-VALIDATION_MODEL = "gemini-1.5-pro-latest"
+REVIEW_MODELS = [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+]
+VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 
 # --- DATA DOWNLOADER CLASS ---
@@ -56,17 +60,41 @@ def find_and_unzip(zip_path, extract_folder):
                 return os.path.join(root, file)
     raise FileNotFoundError(f"No .ipynb file found in the extracted content of {zip_path}")
 
+# --- API CALL FUNCTION (RESTORED TO YOUR ORIGINAL LOGIC) ---
 def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
+    """
+    Calls the Google Gemini API, using JSON Mode CONDITIONALLY for supported models.
+    """
     time.sleep(RATE_LIMIT)
-    safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.2,
-        max_output_tokens=8192,
-        response_mime_type="application/json"
+    safety_settings = {
+        'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+        'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+        'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+        'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+    }
+
+    # Conditional JSON Mode, as in your original script
+    if "flash" in model:
+        generation_config = genai.types.GenerationConfig(
+            temperature=0.2,
+            max_output_tokens=8192
+        )
+    else:
+        generation_config = genai.types.GenerationConfig(
+            temperature=0.2,
+            max_output_tokens=8192,
+            response_mime_type="application/json"
+        )
+
+    model_obj = genai.GenerativeModel(
+        model_name=model,
+        safety_settings=safety_settings,
+        generation_config=generation_config,
+        system_instruction=system_prompt
     )
-    model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
     return response.text
+
 
 def load_notebook_cells(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -100,7 +128,6 @@ def load_guidelines(guidelines_dir):
 
 def extract_json_from_response(response_text):
     if not response_text: raise ValueError("API response was empty.")
-    # The model should be returning JSON directly, but we'll keep this for robustness.
     if response_text.strip().startswith("```json"): response_text = response_text.strip()[7:-3]
     elif response_text.strip().startswith("```"): response_text = response_text.strip()[3:-3]
     json_match = response_text[response_text.find('{'):response_text.rfind('}') + 1]
@@ -231,22 +258,18 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
         response = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
         findings_data = extract_json_from_response(response)
         
-        # Gracefully handle if the model returns valid JSON but forgets the 'findings' key.
         if findings_data and "findings" not in findings_data:
             queue.put([]) # Success with 0 findings
         elif findings_data and "findings" in findings_data:
             findings = findings_data.get("findings", [])
-            # Add context to each finding before putting it on the queue
             for finding in findings:
                 finding["auditor"] = model_name
                 finding["guideline"] = guideline_name
             queue.put(findings)
         else:
-            # This case handles empty or completely invalid JSON responses
             raise ValueError("Response was not a valid JSON object or was empty.")
             
     except Exception as e:
-        # If any error occurs (API call, JSON parsing, etc.), put a detailed error object on the queue.
         error_details = {
             "error": True,
             "guideline": guideline_name,
@@ -287,7 +310,7 @@ def run_audit_workflow(task_number, status_placeholder):
             model = REVIEW_MODELS[i % len(REVIEW_MODELS)]
             thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, model, guideline_name, guideline_content))
             threads.append(thread); thread.start()
-            time.sleep(1) # Stagger API calls slightly
+            time.sleep(1)
         for thread in threads: thread.join()
         status_placeholder.info("✅ All review threads have finished.")
         
@@ -321,7 +344,6 @@ def run_audit_workflow(task_number, status_placeholder):
         return final_report, report_filename, []
     
     except Exception as e:
-        # Catch any other unexpected errors in the main workflow and give them the full dictionary structure
         return None, None, [{"error": True, "guideline": "Main Workflow", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
 
 # --- STREAMLIT UI ---

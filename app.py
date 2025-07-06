@@ -1,3 +1,6 @@
+# app.py (Golden Master Version - Using User-Specified Original Models)
+# Final version as of Monday, July 8, 2024.
+# Added fix for parallel execution race condition.
 import json
 import os
 import requests
@@ -8,10 +11,12 @@ import traceback
 import zipfile
 import google.generativeai as genai
 import streamlit as st
+import tempfile # --- FIX FOR PARALLEL RUNS ---
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
+# --- CONFIGURATION & MODELS (REVERTED TO YOUR ORIGINAL SPECIFICATION) ---
 load_dotenv()
 REVIEW_MODELS = [
     "gemini-2.5-pro",
@@ -57,7 +62,7 @@ def find_and_unzip(zip_path, extract_folder):
                 return os.path.join(root, file)
     raise FileNotFoundError(f"No .ipynb file found in the extracted content of {zip_path}")
 
-# --- API CALL FUNCTION  ---
+# --- API CALL FUNCTION (RESTORED TO YOUR ORIGINAL LOGIC) ---
 def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     """
     Calls the Google Gemini API, using JSON Mode CONDITIONALLY for supported models.
@@ -70,6 +75,7 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
         'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
     }
 
+    # Conditional JSON Mode, as in your original script
     if "flash" in model:
         generation_config = genai.types.GenerationConfig(
             temperature=0.2,
@@ -132,6 +138,7 @@ def extract_json_from_response(response_text):
 
 # --- PROMPT ENGINEERING & REPORTING ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
+    # This is the new, heavily revised prompt with strong instructions and few-shot examples.
     return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a single, specific guideline.
 Your response MUST be a single, valid JSON object and NOTHING ELSE. Do not include conversational text, apologies, or any text outside the final JSON object.
 
@@ -276,70 +283,76 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
 
 # --- MAIN WORKFLOW FUNCTION ---
 def run_audit_workflow(task_number, status_placeholder):
-    try:
-        status_placeholder.info("🚀 Audit initiated...")
-        AUTH_TOKEN = st.secrets["AUTH_TOKEN"]
-        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-        genai.configure(api_key=GEMINI_API_KEY.strip())
+    # --- FIX FOR PARALLEL RUNS: Use a temporary directory for each run ---
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            status_placeholder.info("🚀 Audit initiated...")
+            AUTH_TOKEN = st.secrets["AUTH_TOKEN"]
+            GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+            genai.configure(api_key=GEMINI_API_KEY.strip())
 
-        status_placeholder.info(f"[1/7] Downloading notebook for task '{task_number}'...")
-        notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
-        downloader = DataDownloader(AUTH_TOKEN)
-        zip_path = downloader.download_zip_file(notebook_zip_url, "./downloaded_notebooks")
-        status_placeholder.info("✅ Download complete.")
-        
-        status_placeholder.info(f"[2/7] Unzipping...")
-        notebook_path = find_and_unzip(zip_path, "./task_extracted")
-        notebook_name = os.path.basename(notebook_path)
-        status_placeholder.info(f"✅ Unzip complete. Found notebook: {notebook_name}")
+            status_placeholder.info(f"[1/7] Downloading notebook for task '{task_number}'...")
+            notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
+            downloader = DataDownloader(AUTH_TOKEN)
+            # Use the unique temporary directory for downloads
+            zip_path = downloader.download_zip_file(notebook_zip_url, temp_dir)
+            status_placeholder.info("✅ Download complete.")
+            
+            status_placeholder.info(f"[2/7] Unzipping...")
+            # Use the unique temporary directory for extraction
+            notebook_path = find_and_unzip(zip_path, temp_dir)
+            notebook_name = os.path.basename(notebook_path)
+            status_placeholder.info(f"✅ Unzip complete. Found notebook: {notebook_name}")
 
-        status_placeholder.info("[3/7] Loading and preprocessing data...")
-        guidelines = load_guidelines("./Guidlines")
-        cells = load_notebook_cells(notebook_path)
-        structured_notebook = preprocess_notebook(cells)
-        status_placeholder.info("✅ Data preprocessed.")
+            status_placeholder.info("[3/7] Loading and preprocessing data...")
+            # Guidelines are part of the app, not temporary, so the path is correct.
+            guidelines = load_guidelines("./Guidlines")
+            cells = load_notebook_cells(notebook_path)
+            structured_notebook = preprocess_notebook(cells)
+            status_placeholder.info("✅ Data preprocessed.")
 
-        status_placeholder.info(f"[4/7] Kicking off parallel reviews... (This may take several minutes)")
-        all_findings, results_queue, threads = [], Queue(), []
-        for i, (guideline_name, guideline_content) in enumerate(guidelines.items()):
-            model = REVIEW_MODELS[i % len(REVIEW_MODELS)]
-            thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, model, guideline_name, guideline_content))
-            threads.append(thread); thread.start()
-            time.sleep(1)
-        for thread in threads: thread.join()
-        status_placeholder.info("✅ All review threads have finished.")
-        
-        errors_found = []
-        while not results_queue.empty():
-            result = results_queue.get()
-            if isinstance(result, dict) and result.get("error"):
-                errors_found.append(result)
+            status_placeholder.info(f"[4/7] Kicking off parallel reviews... (This may take several minutes)")
+            all_findings, results_queue, threads = [], Queue(), []
+            for i, (guideline_name, guideline_content) in enumerate(guidelines.items()):
+                model = REVIEW_MODELS[i % len(REVIEW_MODELS)]
+                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, model, guideline_name, guideline_content))
+                threads.append(thread); thread.start()
+                time.sleep(1)
+            for thread in threads: thread.join()
+            status_placeholder.info("✅ All review threads have finished.")
+            
+            errors_found = []
+            while not results_queue.empty():
+                result = results_queue.get()
+                if isinstance(result, dict) and result.get("error"):
+                    errors_found.append(result)
+                else:
+                    all_findings.extend(result)
+            
+            if errors_found:
+                return None, None, errors_found
+
+            status_placeholder.info(f"[5/7] Aggregated {len(all_findings)} findings.")
+            status_placeholder.info(f"[6/7] Running validation with {VALIDATION_MODEL}...")
+            if not all_findings:
+                validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
             else:
-                all_findings.extend(result)
+                validation_prompt = build_validation_prompt(structured_notebook, all_findings)
+                response = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
+                validation_result = extract_json_from_response(response) if response else None
+                if not validation_result:
+                     validation_result = {"final_report": [], "overall_feedback": "Validation step failed: Could not get a valid JSON response from the validation model."}
+            
+            status_placeholder.info("[7/7] Generating final report...")
+            final_report = generate_final_report(validation_result, notebook_name)
+            report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
+            
+            status_placeholder.success("🎉 Audit Complete!")
+            return final_report, report_filename, []
         
-        if errors_found:
-            return None, None, errors_found
-
-        status_placeholder.info(f"[5/7] Aggregated {len(all_findings)} findings.")
-        status_placeholder.info(f"[6/7] Running validation with {VALIDATION_MODEL}...")
-        if not all_findings:
-            validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
-        else:
-            validation_prompt = build_validation_prompt(structured_notebook, all_findings)
-            response = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
-            validation_result = extract_json_from_response(response) if response else None
-            if not validation_result:
-                 validation_result = {"final_report": [], "overall_feedback": "Validation step failed: Could not get a valid JSON response from the validation model."}
-        
-        status_placeholder.info("[7/7] Generating final report...")
-        final_report = generate_final_report(validation_result, notebook_name)
-        report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
-        
-        status_placeholder.success("🎉 Audit Complete!")
-        return final_report, report_filename, []
-    
-    except Exception as e:
-        return None, None, [{"error": True, "guideline": "Main Workflow", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
+        except Exception as e:
+            return None, None, [{"error": True, "guideline": "Main Workflow", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
+    # The temporary directory and its contents are automatically deleted when the 'with' block is exited.
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":

@@ -28,7 +28,6 @@ VALIDATION_MODEL = "gemini-2.5-pro"
 # Rate limiting configuration (seconds between API calls)
 RATE_LIMIT = 5
 
-
 # --- DATA DOWNLOADER CLASS (ADAPTED FOR STREAMLIT UI) ---
 class DataDownloader:
     def __init__(self, auth_token, status_placeholder):
@@ -40,7 +39,11 @@ class DataDownloader:
 
     def download_zip_file(self, url, save_path):
         try:
-            response = requests.get(url, headers=self.headers, stream=True, timeout=120)
+            # --- THIS IS THE FIX ---
+            # Added .strip() to the URL to remove any hidden leading/trailing whitespace
+            response = requests.get(url.strip(), headers=self.headers, stream=True, timeout=120)
+            # --- END OF FIX ---
+            
             response.raise_for_status()
             task_id_match = urlparse(url).query
             task_id = dict(param.split('=') for param in task_id_match.split('&')).get('ids[]')
@@ -53,9 +56,9 @@ class DataDownloader:
             self.status_placeholder.info(f"✅ Successfully downloaded ZIP file to: {full_path}")
             return full_path
         except requests.exceptions.RequestException as e:
-            self.status_placeholder.error(f"❌ Error downloading file: {e}")
+            # This will now show the cleaned URL if it fails for other reasons
+            self.status_placeholder.error(f"❌ Error during download request for URL '{url.strip()}': {e}")
             return None
-
 
 # --- UTILITY FUNCTIONS (ADAPTED FOR STREAMLIT UI) ---
 def find_and_unzip(zip_path, extract_folder, status_placeholder):
@@ -74,7 +77,6 @@ def find_and_unzip(zip_path, extract_folder, status_placeholder):
     except Exception as e:
         status_placeholder.error(f"❌ An error occurred during unzipping: {e}")
         return None
-
 
 # --- API CALL FUNCTION (ADAPTED FOR STREAMLIT UI) ---
 def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
@@ -104,7 +106,6 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
         st.warning(f"⚠️ An unexpected Gemini SDK error occurred ({model}): {type(e).__name__} - {e}")
         return None
 
-
 # --- FILE HANDLING & PREPROCESSING (ADAPTED FOR STREAMLIT UI) ---
 def load_notebook_cells(file_path):
     try:
@@ -114,8 +115,7 @@ def load_notebook_cells(file_path):
         st.error(f"❌ Error loading notebook: {e}")
         return None
 
-
-def preprocess_notebook(cells):  # Unchanged
+def preprocess_notebook(cells): # Unchanged
     structured = {}
     turn_counter = 0
     for i, cell in enumerate(cells):
@@ -142,7 +142,6 @@ def preprocess_notebook(cells):  # Unchanged
             structured[f"turn_{turn_counter}"].append({"cell_number": cell_num, "role": role, "content": source})
     return json.dumps(structured, indent=2)
 
-
 def load_guidelines(guidelines_dir, status_placeholder):
     guidelines = {}
     try:
@@ -159,7 +158,6 @@ def load_guidelines(guidelines_dir, status_placeholder):
         status_placeholder.error(f"❌ Error loading guidelines: {e}")
         return None
 
-
 def extract_json_from_response(response_text):
     if not response_text: return None
     try:
@@ -173,7 +171,6 @@ def extract_json_from_response(response_text):
     except (json.JSONDecodeError, IndexError) as e:
         st.warning(f"⚠️ JSON parsing failed: {e}. Raw text was: {response_text}")
         return None
-
 
 # --- PROMPT ENGINEERING & REPORTING FUNCTIONS (Unchanged from your code) ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
@@ -206,7 +203,6 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
   ]
 }}
 ```"""
-
 
 def build_validation_prompt(structured_notebook, all_findings):
     return f"""As the Senior AI Audit Validator, your task is to review all preliminary findings from a team of specialized AI auditors, validate them, and compile a final, clean report.
@@ -247,8 +243,7 @@ def build_validation_prompt(structured_notebook, all_findings):
 }}
 ```"""
 
-
-def generate_final_report(validation_result, notebook_name):  # Unchanged
+def generate_final_report(validation_result, notebook_name): # Unchanged
     report = f"# Final Audit Report: {notebook_name}\n"
     report += f"**Generated at**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n\n"
     overall_feedback = validation_result.get("overall_feedback", "No overall feedback provided.")
@@ -273,11 +268,10 @@ def generate_final_report(validation_result, notebook_name):  # Unchanged
     report += "\n*Report generated with a multi-model audit via Google Gemini.*"
     return report
 
-
 # --- WORKER FUNCTION FOR THREADING (ADAPTED FOR STREAMLIT UI) ---
 def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content, status_placeholder):
     status_placeholder.info(f"  - ⏳ Assigning '{guideline_name}' review to {model_name}...")
-    system_prompt = "You are a meticulous AI Notebook Auditor..."  # Your prompt
+    system_prompt = "You are a meticulous AI Notebook Auditor..." # Your prompt
     prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
     response = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
     if response:
@@ -288,12 +282,10 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
                 finding["auditor"] = model_name
                 finding["guideline"] = guideline_name
             queue.put(findings)
-            status_placeholder.info(
-                f"  - ✅ {model_name} completed '{guideline_name}' review, found {len(findings)} potential issues.")
+            status_placeholder.info(f"  - ✅ {model_name} completed '{guideline_name}' review, found {len(findings)} potential issues.")
             return
     status_placeholder.warning(f"  - ❌ {model_name} review for '{guideline_name}' failed or returned malformed data.")
     queue.put([])
-
 
 # --- MAIN WORKFLOW (ADAPTED FOR STREAMLIT) ---
 def run_audit_workflow(task_number, status_placeholder):
@@ -305,8 +297,7 @@ def run_audit_workflow(task_number, status_placeholder):
         genai.configure(api_key=GEMINI_API_KEY)
         status_placeholder.info("✅ Gemini API configured.")
     except Exception as e:
-        status_placeholder.error(
-            f"FATAL: Could not configure APIs. Ensure AUTH_TOKEN and GEMINI_API_KEY are in Streamlit secrets. Error: {e}")
+        status_placeholder.error(f"FATAL: Could not configure APIs. Ensure AUTH_TOKEN and GEMINI_API_KEY are in Streamlit secrets. Error: {e}")
         return None, None
 
     # --- Step 2: Download ---
@@ -316,7 +307,7 @@ def run_audit_workflow(task_number, status_placeholder):
     downloader = DataDownloader(AUTH_TOKEN, status_placeholder)
     zip_path = downloader.download_zip_file(notebook_zip_url, download_dir)
     if not zip_path: return None, None
-
+    
     # --- Step 3: Unzip ---
     status_placeholder.info(f"[2/7] Unzipping and locating notebook file...")
     extract_path = os.path.join(download_dir, f"task_{task_number}_extracted")
@@ -326,7 +317,6 @@ def run_audit_workflow(task_number, status_placeholder):
 
     # --- Step 4: Preprocessing ---
     status_placeholder.info("[3/7] Loading and preprocessing data...")
-    # NOTE: The guidelines directory is now relative to the app's root
     guidelines_dir = "Guidlines"
     if not os.path.exists(guidelines_dir):
         status_placeholder.error(f"Directory '{guidelines_dir}' not found. Make sure it's in your GitHub repo.")
@@ -357,27 +347,24 @@ def run_audit_workflow(task_number, status_placeholder):
 
     while not results_queue.empty():
         all_findings.extend(results_queue.get())
-
+    
     # --- Step 6: Validation ---
     status_placeholder.info(f"[5/7] Aggregated {len(all_findings)} findings from all auditors.")
     status_placeholder.info(f"[6/7] Running final validation with Senior Validator ({VALIDATION_MODEL})...")
     if not all_findings:
         status_placeholder.info("✅ No findings to validate. Skipping.")
-        validation_result = {"final_report": [],
-                             "overall_feedback": "Excellent! No issues were found by any of the specialized AI auditors."}
+        validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by any of the specialized AI auditors."}
     else:
         validation_system_prompt = "You are the Senior AI Audit Validator..."
         validation_prompt = build_validation_prompt(structured_notebook, all_findings)
-        response = call_gemini_api(prompt=validation_prompt, system_prompt=validation_system_prompt,
-                                   model=VALIDATION_MODEL)
+        response = call_gemini_api(prompt=validation_prompt, system_prompt=validation_system_prompt, model=VALIDATION_MODEL)
         if response:
             validation_result = extract_json_from_response(response)
             if validation_result and "final_report" in validation_result:
                 status_placeholder.info("✅ Validation complete.")
             else:
                 status_placeholder.warning("❌ Validation failed due to a response parsing error.")
-                validation_result = {"final_report": [],
-                                     "overall_feedback": "Validation failed due to a response parsing error."}
+                validation_result = {"final_report": [], "overall_feedback": "Validation failed due to a response parsing error."}
         else:
             status_placeholder.error("❌ Validation failed due to a Gemini API error.")
             validation_result = {"final_report": [], "overall_feedback": "Validation failed due to a Gemini API error."}
@@ -386,15 +373,14 @@ def run_audit_workflow(task_number, status_placeholder):
     status_placeholder.info("[7/7] Generating final report...")
     final_report = generate_final_report(validation_result, notebook_name)
     report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
-
+    
     status_placeholder.success("🎉 Audit Complete!")
     return final_report, report_filename
-
 
 # --- STREAMLIT USER INTERFACE ---
 if __name__ == "__main__":
     st.set_page_config(page_title="AI Notebook Auditor", layout="wide")
-
+    
     st.title("🤖 AI Notebook Auditor")
     st.markdown("Enter a task number to perform a multi-model review using your specific models and logic.")
 
@@ -402,27 +388,24 @@ if __name__ == "__main__":
 
     if st.button("Start Review", type="primary", use_container_width=True):
         if task_number and task_number.isdigit():
-            # Create placeholders for live updates
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
             report_placeholder = st.empty()
-
-            # This block shows the spinner and runs the main function
+            
             with st.spinner("Executing multi-model audit... This may take several minutes."):
                 final_report_md, report_filename = run_audit_workflow(task_number, status_placeholder)
-
-            # After completion, display the results
+            
             if final_report_md:
                 report_placeholder.markdown("---")
                 report_placeholder.header("Generated Review Content")
                 report_placeholder.markdown(final_report_md)
-
+                
                 st.download_button(
-                    label="⬇️ Download Full Report",
-                    data=final_report_md,
-                    file_name=report_filename,
-                    mime="text/markdown",
-                    use_container_width=True
+                   label="⬇️ Download Full Report",
+                   data=final_report_md,
+                   file_name=report_filename,
+                   mime="text/markdown",
+                   use_container_width=True
                 )
         else:
             st.error("❗ Please enter a valid, numeric task number.")

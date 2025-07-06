@@ -1,0 +1,6 @@
+# requirements.txt
+requests
+python-docx
+google-generativeai
+python-dotenv
+streamlit

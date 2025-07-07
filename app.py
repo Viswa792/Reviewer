@@ -1,4 +1,4 @@
-# app.py (Maximum Accuracy & Consistency Version - v3 with Cost Logging)
+# app.py (Maximum Accuracy & Consistency Version - v4 with Higher Token Limit)
 import json
 import os
 import re 
@@ -24,7 +24,8 @@ RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 COST_LOG_FILE = 'audit_log.csv'
 MAX_RUNS_PER_TASK = 2
-TOKEN_LIMIT = 190000
+# Set a higher, safe token limit to maximize context while avoiding higher pricing tiers.
+TOKEN_LIMIT = 199000
 usage_lock = threading.Lock()
 
 # --- PRICING CONSTANTS FOR COST ESTIMATION ---
@@ -442,7 +443,6 @@ def run_audit_workflow(task_number, status_placeholder):
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
-            # --- COST LOGGING ---
             cost_usd = ((total_input_tokens / 1_000_000) * PRICE_PER_MILLION_INPUT_TOKENS_USD) + \
                        ((total_output_tokens / 1_000_000) * PRICE_PER_MILLION_OUTPUT_TOKENS_USD)
             cost_inr = cost_usd * USD_TO_INR_EXCHANGE_RATE

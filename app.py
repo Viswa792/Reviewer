@@ -1,4 +1,3 @@
-# app.py (Final High-Accuracy & Consistency Version - v5)
 import json
 import os
 import re 
@@ -426,7 +425,6 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
-            # Aggregate all token counts and costs
             total_input_tokens = 0
             total_output_tokens = 0
             total_cost_inr = 0

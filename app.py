@@ -1,6 +1,7 @@
 # app.py (Cost-Optimized Version - With Usage Limits and JSON Fix)
 # Final version as of Monday, July 8, 2024.
 # Implements batched reviews and a 2-run limit per task.
+# Accuracy-focused prompt update.
 import json
 import os
 import requests
@@ -133,23 +134,33 @@ def extract_json_from_response(response_text):
 def build_batched_review_prompt(structured_notebook, guideline_batch):
     guideline_names = list(guideline_batch.keys())
     
-    combined_guideline_content = ""
-    for name, content in guideline_batch.items():
-        combined_guideline_content += f"--- Guideline: {name} ---\n{content}\n\n"
+    # Create the detailed breakdown of guidelines for the prompt
+    guideline_section = ""
+    for i, (name, content) in enumerate(guideline_batch.items()):
+        guideline_section += f"Guideline {i+1}: **{name}**\n---\n{content}\n---\n\n"
 
-    return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a batch of guidelines simultaneously.
+    # Create the sequential analysis instruction
+    analysis_steps = ""
+    for i, name in enumerate(guideline_names):
+        analysis_steps += f"{i+1}. First, review the entire notebook ONLY for violations of the **{name}** guideline.\n"
+    analysis_steps += f"{len(guideline_names)+1}. Finally, combine all findings from all guidelines into a single `findings` array in your final JSON output."
+
+
+    return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a batch of guidelines by following a strict, sequential process.
 Your response MUST be a single, valid JSON object and NOTHING ELSE.
 
-**Your Focus: The following guidelines: {', '.join(guideline_names)}**
-{combined_guideline_content}
+**Guidelines for Review:**
+{guideline_section}
 
-**Mandatory Instructions:**
-1.  Analyze the entire notebook provided below.
-2.  For each violation you find, you MUST identify which guideline was violated.
-3.  Your JSON response MUST include a `violation_category` key for each finding, specifying the name of the guideline that was violated (e.g., "hallucination", "logical").
-4.  If you find multiple findings, ensure there is a comma separating each JSON object in the `findings` array.
-5.  If you find NO violations for ANY of the provided guidelines, you MUST return an empty `findings` array.
-6.  Your response MUST conform to the JSON schema specified in the example.
+**Mandatory Sequential Analysis Instructions:**
+You must perform the analysis in this exact order:
+{analysis_steps}
+
+**Output Format Rules:**
+1.  For each finding, you MUST include the `violation_category` key, specifying which guideline was violated (e.g., "hallucination", "logical").
+2.  If you find multiple findings, ensure there is a comma separating each JSON object in the `findings` array.
+3.  If you find NO violations for ANY of the provided guidelines, you MUST return an empty `findings` array: `"findings": []`.
+4.  Your response MUST conform to the JSON schema in the example.
 
 **Output Example:**
 ```json
@@ -176,7 +187,7 @@ Your response MUST be a single, valid JSON object and NOTHING ELSE.
 {structured_notebook}
 ---
 
-Begin your analysis now. Your final output MUST BE the JSON object and nothing more.
+Begin your sequential analysis now. Your final output MUST BE the JSON object and nothing more.
 """
 
 def build_validation_prompt(structured_notebook, all_findings):

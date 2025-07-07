@@ -232,35 +232,40 @@ def extract_json_from_response(response_text):
             cleaned_text = cleaned_text[:-3].strip()
 
     # Find the outermost JSON object/array
-    json_match = cleaned_text[cleaned_text.find('{'):cleaned_text.rfind('}') + 1]
+    json_match_obj = cleaned_text[cleaned_text.find('{'):cleaned_text.rfind('}') + 1]
+    json_match_arr = cleaned_text[cleaned_text.find('['):cleaned_text.rfind(']') + 1]
+
+    json_match = ""
+    if json_match_obj and json_match_arr:
+        # Prioritize the one that starts earlier
+        if cleaned_text.find('{') < cleaned_text.find('['):
+            json_match = json_match_obj
+        else:
+            json_match = json_match_arr
+    elif json_match_obj:
+        json_match = json_match_obj
+    elif json_match_arr:
+        json_match = json_match_arr
+
     if not json_match:
-        # Also check for array as root
-        json_match = cleaned_text[cleaned_text.find('['):cleaned_text.rfind(']') + 1]
+        raise ValueError(f"Could not find a valid JSON object or array in the response. Raw Text: {response_text}")
 
+    try:
+        return json.loads(json_match)
+    except json.JSONDecodeError as e:
+        # Attempt to fix missing commas between objects in an array or concatenated objects
+        # This regex inserts a comma if a '}' is followed by whitespace and then a '{'
+        # without an intervening comma.
+        fixed_json_match = re.sub(r'(?<=\})\s*(?=\{)', ',', json_match)
 
-    if json_match:
+        # Another common issue is trailing commas, which are not valid JSON.
+        # This regex attempts to remove trailing commas before ']' or '}'
+        fixed_json_match = re.sub(r',\s*([\]}])', r'\1', fixed_json_match)
+
         try:
-            return json.loads(json_match)
-        except json.JSONDecodeError as e:
-            # Attempt to fix common JSON errors, like missing commas between objects in an array
-            # This regex specifically targets cases like "}{" and replaces with "},{"
-            fixed_json_match = re.sub(r'(?<=\})\s*(?=\{)', ',', json_match)
-            try:
-                return json.loads(fixed_json_match)
-            except json.JSONDecodeError:
-                # If the above fix doesn't work, try a more general approach for missing commas within arrays
-                # This is a bit more aggressive and assumes the structure is mostly correct,
-                # but just lacks commas where objects end and new ones begin in a list.
-                fixed_json_match_alt = re.sub(r'\}\s*,\s*\{', '},{', fixed_json_match) # Remove extra commas
-                fixed_json_match_alt = re.sub(r'\}\s*\{', '},{', fixed_json_match_alt) # Add missing commas between objects
-                try:
-                    return json.loads(fixed_json_match_alt)
-                except json.JSONDecodeError:
-                    raise ValueError(f"JSON auto-correction failed. Original Error: {e}. Raw Text: {response_text}")
-            else: # If the first fix worked
-                return json.loads(fixed_json_match) # Return the result of the first fix
-    
-    raise ValueError(f"Could not find a valid JSON object in the response. Raw Text: {response_text}")
+            return json.loads(fixed_json_match)
+        except json.JSONDecodeError as e_fixed:
+            raise ValueError(f"JSON auto-correction failed after multiple attempts. Original Error: {e}. Fixed Error: {e_fixed}. Raw Text: {response_text}")
 
 
 # --- PROMPT ENGINEERING & REPORTING ---
@@ -399,7 +404,8 @@ def generate_final_report(validation_result, notebook_name, cell_role_map):
                 report += header + "\n\n"
 
                 for issue in issues:
-                    report += f"**Violation Category:** {issue.get('viulation_category', 'N/A')}\n\n"
+                    # Corrected typo here from 'viulation_category' to 'violation_category'
+                    report += f"**Violation Category:** {issue.get('violation_category', 'N/A')}\n\n"
                     report += f"**Problematic Content:**\n```\n{issue.get('problematic_content', 'N/A')}\n```\n\n"
                     report += f"**Reason for Violation:**\n{issue.get('reason_for_violation', 'N/A')}\n\n"
                     report += f"**Validator's Reasoning:**\n*_{issue.get('validation_reasoning', 'N/A')}_*\n\n"
@@ -501,7 +507,7 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             errors_found = []
             while not results_queue.empty():
                 result_list = results_queue.get()
-                for result in result_list:
+                for result in result:
                     if isinstance(result, dict) and result.get("error"):
                         errors_found.append(result)
                     else:
@@ -620,4 +626,3 @@ if __name__ == "__main__":
                                    use_container_width=True)
         else:
             st.error("❗ Please enter a valid, numeric task number.")
-

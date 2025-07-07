@@ -1,4 +1,4 @@
-# app.py (High-Accuracy Professional Version)
+# app.py (High-Accuracy Professional Version - v2)
 import json
 import os
 import requests
@@ -261,16 +261,18 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
 
 # --- MAIN WORKFLOW FUNCTION ---
 def run_audit_workflow(task_number, status_placeholder):
-    usage_data = read_usage_tracker()
-    run_count = usage_data.get(str(task_number), 0)
-    if run_count >= MAX_RUNS_PER_TASK:
-        raise PermissionError(f"Task {task_number} has already been reviewed the maximum number of times ({MAX_RUNS_PER_TASK}).")
+    try:
+        # --- FIX: Moved usage check inside the main try...except block ---
+        usage_data = read_usage_tracker()
+        run_count = usage_data.get(str(task_number), 0)
+        if run_count >= MAX_RUNS_PER_TASK:
+            raise PermissionError(f"Task {task_number} has already been reviewed the maximum number of times ({MAX_RUNS_PER_TASK}).")
+        
+        # If check passes, increment and save before starting the long process
+        usage_data[str(task_number)] = run_count + 1
+        write_usage_tracker(usage_data)
     
-    usage_data[str(task_number)] = run_count + 1
-    write_usage_tracker(usage_data)
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
+        with tempfile.TemporaryDirectory() as temp_dir:
             status_placeholder.info(f"🚀 Audit initiated for task {task_number} (Run {run_count + 1} of {MAX_RUNS_PER_TASK})...")
             AUTH_TOKEN = st.secrets["AUTH_TOKEN"]
             GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -290,10 +292,15 @@ def run_audit_workflow(task_number, status_placeholder):
             status_placeholder.info("[2/5] Kicking off individual parallel reviews...")
             all_findings, results_queue, threads = [], Queue(), []
             for guideline_name, guideline_content in all_guidelines.items():
+                # --- NEW: Interactive logging for each dispatched task ---
+                status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
                 thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, REVIEW_MODEL, guideline_name, guideline_content))
                 threads.append(thread); thread.start()
                 time.sleep(1)
-            for thread in threads: thread.join()
+            
+            # Wait for all threads to complete their work
+            for thread in threads: 
+                thread.join()
             status_placeholder.info("✅ All review threads finished.")
 
             errors_found = []
@@ -326,8 +333,8 @@ def run_audit_workflow(task_number, status_placeholder):
             status_placeholder.success("🎉 Audit Complete!")
             return final_report, report_filename, []
         
-        except Exception as e:
-            return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
+    except Exception as e:
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
@@ -347,11 +354,14 @@ if __name__ == "__main__":
             if errors:
                 st.error("The audit could not be completed:")
                 for error in errors:
-                    if error.get('guideline') != 'Pre-flight Check':
-                        st.subheader(f"Error during: `{error.get('guideline', 'Unknown Step')}` review (Model: `{error.get('model', 'N/A')}`)")
-                    st.write("**Message:**")
-                    st.code(error.get('message', 'No message.'), language='text')
-                    if "PermissionError" not in error.get('traceback', ''):
+                    # Cleanly display the PermissionError without a traceback
+                    if "PermissionError" in error.get('traceback', ''):
+                         st.warning(error.get('message'))
+                    else:
+                        if error.get('guideline') != 'Pre-flight Check':
+                            st.subheader(f"Error during: `{error.get('guideline', 'Unknown Step')}` review (Model: `{error.get('model', 'N/A')}`)")
+                        st.write("**Message:**")
+                        st.code(error.get('message', 'No message.'), language='text')
                         st.write("**Full Traceback:**")
                         st.code(error.get('traceback', 'No traceback.'), language='text')
 

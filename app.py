@@ -1,4 +1,4 @@
-# app.py (Final High-Accuracy & Consistency Version - v7 with Syntax Fix)
+# app.py (Final High-Accuracy & Consistency Version - v5)
 import json
 import os
 import re 
@@ -21,18 +21,23 @@ from datetime import datetime
 # --- CONFIGURATION FOR MAXIMUM ACCURACY ---
 load_dotenv()
 REVIEW_MODEL = "gemini-2.5-pro"
-VALIDATION_MODEL = "gemini-2.5-pro"
+VALIDATION_MODEL = "gemini-2.5-flash"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
-COST_LOG_FILE = 'audit_log.csv'
 MAX_RUNS_PER_TASK = 2
-TOKEN_LIMIT = 199000
 usage_lock = threading.Lock()
 
-# --- PRICING CONSTANTS FOR COST ESTIMATION ---
-PRICE_PER_MILLION_INPUT_TOKENS_USD = 1.50 
-PRICE_PER_MILLION_OUTPUT_TOKENS_USD = 7.50
+# --- PRICING CONSTANTS FOR COST ESTIMATION (From Google's July 2025 table) ---
 USD_TO_INR_EXCHANGE_RATE = 85.0 
+# Prices are per 1 million tokens.
+GEMINI_2_5_PRO_PRICING = {
+    "low_tier": {"input": 1.25, "output": 10.00, "threshold": 200000},
+    "high_tier": {"input": 2.50, "output": 15.00}
+}
+GEMINI_2_5_FLASH_PRICING = {
+    "input": 0.30, 
+    "output": 2.50
+}
 
 # --- FIRESTORE INITIALIZATION ---
 def initialize_firestore():
@@ -94,6 +99,23 @@ def log_audit_to_firestore(db_client, log_data):
             db_client.collection('audit_logs').add(log_data)
         except Exception as e:
             st.warning(f"Could not write log to Firestore: {e}")
+
+def calculate_cost_inr(model_name, input_tokens, output_tokens):
+    """Calculates the cost in INR based on the specific model and its pricing tiers."""
+    cost_usd = 0.0
+    if "2.5-pro" in model_name:
+        pricing = GEMINI_2_5_PRO_PRICING
+        tier = "low_tier" if input_tokens <= pricing["low_tier"]["threshold"] else "high_tier"
+        input_cost_usd = (input_tokens / 1_000_000) * pricing[tier]["input"]
+        output_cost_usd = (output_tokens / 1_000_000) * pricing[tier]["output"]
+        cost_usd = input_cost_usd + output_cost_usd
+    elif "2.5-flash" in model_name:
+        pricing = GEMINI_2_5_FLASH_PRICING
+        input_cost_usd = (input_tokens / 1_000_000) * pricing["input"]
+        output_cost_usd = (output_tokens / 1_000_000) * pricing["output"]
+        cost_usd = input_cost_usd + output_cost_usd
+    
+    return cost_usd * USD_TO_INR_EXCHANGE_RATE
 
 # --- UTILITY AND LOGIC FUNCTIONS ---
 def find_and_unzip(zip_path, extract_folder):
@@ -308,26 +330,8 @@ def generate_final_report(validation_result, notebook_name):
 def run_review_task(queue, model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock):
     try:
         system_prompt = "You are a meticulous AI Notebook Auditor..."
+        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
         
-        temp_notebook_data = json.loads(structured_notebook)
-        
-        while True:
-            current_notebook_str = json.dumps(temp_notebook_data)
-            prompt = build_targeted_review_prompt(current_notebook_str, guideline_name, guideline_content)
-            
-            token_count = model_obj.count_tokens(prompt).total_tokens
-            
-            if token_count <= TOKEN_LIMIT:
-                if len(current_notebook_str) < len(structured_notebook):
-                    queue.put([{"warning": f"Input for '{guideline_name}' review was truncated to fit within the token limit."}])
-                break 
-            
-            if len(temp_notebook_data) > 1:
-                last_turn_key = sorted(temp_notebook_data.keys())[-1]
-                del temp_notebook_data[last_turn_key]
-            else:
-                raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
-
         response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model_obj=model_obj)
         
         with token_lock:
@@ -366,13 +370,14 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=GEMINI_API_KEY.strip())
 
-            generation_config = genai.types.GenerationConfig(temperature=0.0, max_output_tokens=16384, response_mime_type="application/json")
+            review_gen_config = genai.types.GenerationConfig(temperature=0.0, max_output_tokens=16384, response_mime_type="application/json")
+            validation_gen_config = genai.types.GenerationConfig(temperature=0.0, max_output_tokens=16384)
             safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
-            # --- FIX: Correctly close the parenthesis on both lines ---
-            review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=generation_config, safety_settings=safety_settings)
-            validation_model_obj = genai.GenerativeModel(VALIDATION_MODEL, generation_config=generation_config, safety_settings=safety_settings)
+            
+            review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=review_gen_config, safety_settings=safety_settings)
+            validation_model_obj = genai.GenerativeModel(VALIDATION_MODEL, generation_config=validation_gen_config, safety_settings=safety_settings)
 
-            status_placeholder.info(f"[1/6] Downloading & Preprocessing...")
+            status_placeholder.info(f"[1/5] Downloading & Preprocessing...")
             notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
             downloader = DataDownloader(AUTH_TOKEN)
             zip_path = downloader.download_zip_file(notebook_zip_url, temp_dir)
@@ -383,29 +388,10 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             all_guidelines = load_guidelines("./Guidlines")
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
-            warnings_found = []
-            review_queue = list(all_guidelines.items())
-
-            longest_guideline_content = max(all_guidelines.values(), key=len) if all_guidelines else ""
-            worst_case_prompt = build_targeted_review_prompt(structured_notebook, "worst_case", longest_guideline_content)
-            worst_case_token_count = review_model_obj.count_tokens(worst_case_prompt).total_tokens
-
-            if worst_case_token_count > TOKEN_LIMIT:
-                status_placeholder.warning("⚠️ Large notebook detected. Attempting Tier 1 optimization...")
-                
-                original_len = len(review_queue)
-                review_queue = [item for item in review_queue if item[0] != 'structure']
-                
-                if len(review_queue) < original_len:
-                    warnings_found.append("Input is too large. The 'structure' guideline review was skipped to prioritize accuracy on other checks.")
-                    status_placeholder.info("✅ Tier 1 Optimization: Skipped 'structure' guideline.")
-                else:
-                    status_placeholder.info("Could not apply optimization ('structure' guideline not found).")
-
-            status_placeholder.info("[2/6] Kicking off individual parallel reviews...")
+            status_placeholder.info("[2/5] Kicking off individual parallel reviews...")
             all_findings, results_queue = [], Queue()
             threads, token_counts, token_lock = [], [], threading.Lock()
-            for guideline_name, guideline_content in review_queue:
+            for guideline_name, guideline_content in all_guidelines.items():
                 status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
                 thread = threading.Thread(target=run_review_task, args=(results_queue, review_model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock))
                 threads.append(thread); thread.start()
@@ -421,16 +407,14 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                 for result in result_list:
                     if isinstance(result, dict) and result.get("error"):
                         errors_found.append(result)
-                    elif isinstance(result, dict) and result.get("warning"):
-                        warnings_found.append(result.get("warning"))
                     else:
                         all_findings.append(result)
             
             if errors_found:
                 return None, None, errors_found, {}, []
 
-            status_placeholder.info(f"[3/6] Aggregated {len(all_findings)} findings.")
-            status_placeholder.info(f"[4/6] Running final validation with {VALIDATION_MODEL}...")
+            status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
+            status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
             
             validation_token_dict = {'input': 0, 'output': 0}
             if not all_findings:
@@ -442,38 +426,44 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
-            total_input_tokens = sum(d['input'] for d in token_counts) + validation_token_dict['input']
-            total_output_tokens = sum(d['output'] for d in token_counts) + validation_token_dict['output']
-            grand_total = total_input_tokens + total_output_tokens
+            # Aggregate all token counts and costs
+            total_input_tokens = 0
+            total_output_tokens = 0
+            total_cost_inr = 0
+
+            for tc in token_counts:
+                total_input_tokens += tc['input']
+                total_output_tokens += tc['output']
+                total_cost_inr += calculate_cost_inr(REVIEW_MODEL, tc['input'], tc['output'])
+
+            total_input_tokens += validation_token_dict['input']
+            total_output_tokens += validation_token_dict['output']
+            total_cost_inr += calculate_cost_inr(VALIDATION_MODEL, validation_token_dict['input'], validation_token_dict['output'])
+            
+            grand_total_tokens = total_input_tokens + total_output_tokens
 
             final_token_summary = {
                 'input': total_input_tokens,
                 'output': total_output_tokens,
-                'total': grand_total
+                'total': grand_total_tokens
             }
 
-            status_placeholder.info("[5/6] Generating final report...")
+            status_placeholder.info("[5/5] Generating final report...")
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
-            
-            status_placeholder.info("[6/6] Logging audit results...")
-            cost_usd = ((total_input_tokens / 1_000_000) * PRICE_PER_MILLION_INPUT_TOKENS_USD) + \
-                       ((total_output_tokens / 1_000_000) * PRICE_PER_MILLION_OUTPUT_TOKENS_USD)
-            cost_inr = cost_usd * USD_TO_INR_EXCHANGE_RATE
             
             log_entry = {
                 "timestamp": datetime.now(),
                 "task_number": task_number,
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
-                "total_tokens": grand_total,
-                "estimated_cost_inr": cost_inr,
-                "warnings": warnings_found
+                "total_tokens": grand_total_tokens,
+                "estimated_cost_inr": total_cost_inr
             }
             log_audit_to_firestore(db_client, log_entry)
             
             status_placeholder.success("🎉 Audit Complete!")
-            return final_report, report_filename, [], final_token_summary, warnings_found
+            return final_report, report_filename, [], final_token_summary, []
         
     except Exception as e:
         return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}, []

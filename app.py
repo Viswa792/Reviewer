@@ -26,7 +26,6 @@ USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2
 usage_lock = threading.Lock()
 
-# --- PRICING CONSTANTS FOR COST ESTIMATION (From Google's July 2025 table) ---
 USD_TO_INR_EXCHANGE_RATE = 85.0 
 # Prices are per 1 million tokens.
 GEMINI_2_5_PRO_PRICING = {
@@ -52,7 +51,6 @@ def initialize_firestore():
             return None
     return firestore.client()
 
-# --- DATA DOWNLOADER CLASS ---
 class DataDownloader:
     def __init__(self, auth_token):
         self.auth_token = auth_token

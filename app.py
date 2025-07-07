@@ -164,7 +164,16 @@ def preprocess_notebook(cells):
     cell_role_map = {}  # Map to store role for each cell number
     for i, cell in enumerate(cells):
         source, cell_num, role = "".join(cell.get('source', [])), i + 1, "unknown"
-        markers = {"**[system]**": "system_prompt", "**[user]**": "user_query", "**[assistant]**": "assistant_response", "**[thinking]**": "assistant_thinking", "**[thought]**": "assistant_thought", "**[tool_use]**": "tool_code", "**[tool_output]**": "tool_output", "**[tools]**": "tool_definitions"}
+        markers = {
+            "**[system]**": "system_prompt", 
+            "**[user]**": "user_query", 
+            "**[assistant]**": "assistant_response", 
+            "**[thinking]**": "assistant_thinking", 
+            "**[thought]**": "assistant_thought", 
+            "**[tool_use]**": "tool_use",  # Changed for consistency
+            "**[tool_output]**": "tool_output", 
+            "**[tools]**": "tool_definitions"
+        }
         for marker, r in markers.items():
             if marker in source: 
                 role = r
@@ -333,22 +342,26 @@ def generate_final_report(validation_result, notebook_name, cell_role_map):
             "assistant_response": "[assistant]",
             "assistant_thinking": "[thinking]",
             "assistant_thought": "[thought]",
-            "tool_code": "[tool]",
+            "tool_use": "[tool]", # Changed for consistency
             "tool_output": "[tool_output]",
             "tool_definitions": "[tools]",
             "unknown": "[unknown]"
         }
         sorted_report_data = sorted(final_report_data, key=lambda x: x.get("cell_number", float('inf')))
         for cell_data in sorted_report_data:
-            cell_num = cell_data.get("cell_number", "N/A")
+            cell_num = cell_data.get("cell_number")
             issues = cell_data.get("validated_issues", [])
-            if issues:
+            
+            if issues and cell_num is not None:
                 # Look up the role from the map created during preprocessing
                 role = cell_role_map.get(cell_num, 'unknown')
                 display_role = display_role_map.get(role, f"[{role}]") # Fallback for safety
                 
-                # Add the cell type to the header
-                report += f"### Cell {cell_num} {display_role}\n"
+                # Defensively build the header to ensure the role is always displayed
+                header = f"### Cell {cell_num}"
+                if display_role and display_role.strip():
+                    header += f" {display_role.strip()}"
+                report += header + "\n\n"
                 
                 for issue in issues:
                     report += f"**Violation Category:** {issue.get('violation_category', 'N/A')}\n\n"

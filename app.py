@@ -1,4 +1,4 @@
-# app.py (High-Accuracy Professional Version - v4 with Granular Token Tracking)
+# app.py (High-Accuracy Professional Version - v5 with Safety Filter Handling)
 import json
 import os
 import requests
@@ -86,6 +86,18 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
     
+    # --- FIX FOR SAFETY FILTER ERROR ---
+    # Check if the response was blocked before trying to access .text
+    if not response.parts:
+        try:
+            finish_reason = response.candidates[0].finish_reason.name
+            if finish_reason == "SAFETY":
+                raise ValueError("The model's response was blocked by safety filters. This can happen if the notebook contains sensitive content or code that is misinterpreted. The audit for this guideline cannot proceed.")
+            else:
+                raise ValueError(f"The model stopped generating text for an unexpected reason: {finish_reason}")
+        except (IndexError, AttributeError):
+             raise ValueError("The model returned an empty response without a clear reason. This may be due to a content filter.")
+
     token_dict = {'input': 0, 'output': 0}
     try:
         token_dict['input'] = response.usage_metadata.prompt_token_count
@@ -342,7 +354,6 @@ def run_audit_workflow(task_number, status_placeholder):
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
-            # Aggregate all token counts
             total_input_tokens = sum(d['input'] for d in token_counts) + validation_token_dict['input']
             total_output_tokens = sum(d['output'] for d in token_counts) + validation_token_dict['output']
             grand_total = total_input_tokens + total_output_tokens

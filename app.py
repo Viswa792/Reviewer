@@ -1,7 +1,7 @@
-# app.py (High-Accuracy Professional Version - v7 with JSON Auto-Correction)
+# app.py (Maximum Accuracy & Consistency Version)
 import json
 import os
-import re # --- FIX: Import regular expressions for JSON correction ---
+import re 
 import requests
 import time
 import docx
@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
 load_dotenv()
-REVIEW_MODEL = "gemini-2.5-flash"
+# Use the most powerful model for all tasks to maximize accuracy and consistency.
+REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
@@ -80,11 +81,13 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
     
     new_token_limit = 16384
-
-    if "flash" in model:
-        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=new_token_limit)
-    else:
-        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=new_token_limit, response_mime_type="application/json")
+    
+    # Set temperature to 0 for maximum consistency and determinism.
+    generation_config = genai.types.GenerationConfig(
+        temperature=0.0, 
+        max_output_tokens=new_token_limit, 
+        response_mime_type="application/json"
+    )
     
     model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
@@ -141,32 +144,24 @@ def load_guidelines(guidelines_dir):
 def extract_json_from_response(response_text):
     if not response_text: raise ValueError("API response was empty.")
     
-    # Extract text between ```json and ```
     if response_text.strip().startswith("```json"):
         response_text = response_text.strip()[7:-3]
     elif response_text.strip().startswith("```"):
         response_text = response_text.strip()[3:-3]
 
-    # Find the outermost curly braces
     json_match = response_text[response_text.find('{'):response_text.rfind('}') + 1]
 
     if json_match:
         try:
-            # First attempt to parse the JSON as-is
             return json.loads(json_match)
         except json.JSONDecodeError as e:
-            # If it fails with a "Expecting ','" error, try to fix it
             if "Expecting ',' delimiter" in str(e):
-                # Use regex to find "}{" with optional whitespace and insert a comma
                 fixed_json_match = re.sub(r'\}\s*\{', '}, {', json_match)
                 try:
-                    # Retry parsing with the fixed string
                     return json.loads(fixed_json_match)
                 except json.JSONDecodeError:
-                    # If it still fails, raise a more informative error
                     raise ValueError(f"JSON auto-correction failed. Original Error: {e}. Raw Text: {response_text}")
             else:
-                # If it's a different JSON error, raise it
                 raise ValueError(f"JSON Parsing Failed with a non-comma error. Raw Text: {response_text}")
 
     raise ValueError(f"Could not find a valid JSON object in the response. Raw Text: {response_text}")

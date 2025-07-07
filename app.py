@@ -303,6 +303,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 4.  **No Violations:** If you find NO violations, you MUST return an empty `findings` array: `"findings": []`.
 5.  **Strict JSON:** Your entire output must be a single, valid JSON object. Do not include any conversational text.
 6.  **CRITICAL JSON SYNTAX:** If the `findings` array contains more than one object, you MUST place a comma (`,`) between each object.
+7.  **Explain in Simple English:** Write all explanations (`reason_for_violation` and `validation_reasoning`) in simple, clear English. The goal is for a non-technical person to easily understand the error.
 
 **Output Example (if violations are found):**
 ```json

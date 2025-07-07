@@ -554,7 +554,7 @@ if __name__ == "__main__":
                         st.code(error.get('traceback', 'No traceback.'), language='text')
 
             elif final_report_md:
-                st.info(f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}** | **Est. Cost: ₹{total_cost_inr:,.2f}**")
+                st.info(f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}**")
                 st.balloons()
                 st.header("Generated Review Content")
                 st.markdown(final_report_md)

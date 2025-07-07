@@ -1,6 +1,7 @@
-# app.py (High-Accuracy Professional Version - v6 with Increased Token Limit)
+# app.py (High-Accuracy Professional Version - v7 with JSON Auto-Correction)
 import json
 import os
+import re # --- FIX: Import regular expressions for JSON correction ---
 import requests
 import time
 import docx
@@ -139,11 +140,37 @@ def load_guidelines(guidelines_dir):
 
 def extract_json_from_response(response_text):
     if not response_text: raise ValueError("API response was empty.")
-    if response_text.strip().startswith("```json"): response_text = response_text.strip()[7:-3]
-    elif response_text.strip().startswith("```"): response_text = response_text.strip()[3:-3]
+    
+    # Extract text between ```json and ```
+    if response_text.strip().startswith("```json"):
+        response_text = response_text.strip()[7:-3]
+    elif response_text.strip().startswith("```"):
+        response_text = response_text.strip()[3:-3]
+
+    # Find the outermost curly braces
     json_match = response_text[response_text.find('{'):response_text.rfind('}') + 1]
-    if json_match: return json.loads(json_match)
-    raise ValueError(f"JSON Parsing Failed. Raw Text: {response_text}")
+
+    if json_match:
+        try:
+            # First attempt to parse the JSON as-is
+            return json.loads(json_match)
+        except json.JSONDecodeError as e:
+            # If it fails with a "Expecting ','" error, try to fix it
+            if "Expecting ',' delimiter" in str(e):
+                # Use regex to find "}{" with optional whitespace and insert a comma
+                fixed_json_match = re.sub(r'\}\s*\{', '}, {', json_match)
+                try:
+                    # Retry parsing with the fixed string
+                    return json.loads(fixed_json_match)
+                except json.JSONDecodeError:
+                    # If it still fails, raise a more informative error
+                    raise ValueError(f"JSON auto-correction failed. Original Error: {e}. Raw Text: {response_text}")
+            else:
+                # If it's a different JSON error, raise it
+                raise ValueError(f"JSON Parsing Failed with a non-comma error. Raw Text: {response_text}")
+
+    raise ValueError(f"Could not find a valid JSON object in the response. Raw Text: {response_text}")
+
 
 # --- PROMPT ENGINEERING & REPORTING ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):

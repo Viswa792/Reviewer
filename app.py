@@ -19,22 +19,23 @@ from datetime import datetime
 
 # --- CONFIGURATION FOR MAXIMUM ACCURACY ---
 load_dotenv()
-REVIEW_MODEL = "gemini-1.5-pro"
+REVIEW_MODEL = "gemini-pro" 
 VALIDATION_MODEL = "gemini-1.5-flash"
-RATE_LIMIT = 5  # Seconds to wait between API calls
+RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2
 usage_lock = threading.Lock()
 
 USD_TO_INR_EXCHANGE_RATE = 85.0
 # Prices are per 1 million tokens.
-GEMINI_1_5_PRO_PRICING = {
-    "low_tier": {"input": 3.50, "output": 10.50, "threshold": 128000},
-    "high_tier": {"input": 7.00, "output": 21.00}
+# Restored the tiered pricing for the Pro model
+GEMINI_PRO_PRICING = {
+    "low_tier": {"input": 1.25, "output": 10.00, "threshold": 200000},
+    "high_tier": {"input": 2.50, "output": 15.00}
 }
-GEMINI_1_5_FLASH_PRICING = {
-    "input": 0.35,
-    "output": 1.05
+GEMINI_FLASH_PRICING = {
+    "input": 0.30,
+    "output": 2.50
 }
 
 
@@ -123,15 +124,16 @@ def log_audit_to_firestore(db_client, log_data):
 def calculate_cost_inr(model_name, input_tokens, output_tokens):
     """Calculates the cost in INR based on the specific model and its pricing tiers."""
     cost_usd = 0.0
-    if "1.5-pro" in model_name:
-        pricing = GEMINI_1_5_PRO_PRICING
+    # Updated logic to handle tiered pricing for the Pro model
+    if "pro" in model_name:
+        pricing = GEMINI_PRO_PRICING
         # Determine pricing tier based on input token count
         tier = "low_tier" if input_tokens <= pricing["low_tier"]["threshold"] else "high_tier"
         input_cost_usd = (input_tokens / 1_000_000) * pricing[tier]["input"]
         output_cost_usd = (output_tokens / 1_000_000) * pricing[tier]["output"]
         cost_usd = input_cost_usd + output_cost_usd
-    elif "1.5-flash" in model_name:
-        pricing = GEMINI_1_5_FLASH_PRICING
+    elif "flash" in model_name:
+        pricing = GEMINI_FLASH_PRICING
         input_cost_usd = (input_tokens / 1_000_000) * pricing["input"]
         output_cost_usd = (output_tokens / 1_000_000) * pricing["output"]
         cost_usd = input_cost_usd + output_cost_usd
@@ -394,7 +396,6 @@ def generate_final_report(validation_result, notebook_name, cell_role_map):
                 report += f"### Cell {cell_num} {display_role.strip()}\n\n"
 
                 for issue in issues:
-                    # FIX: Corrected typo from 'viulation_category' to 'violation_category'
                     report += f"**Violation Category:** {issue.get('violation_category', 'N/A')}\n\n"
                     report += f"**Problematic Content:**\n```\n{issue.get('problematic_content', 'N/A')}\n```\n\n"
                     report += f"**Reason for Violation:**\n{issue.get('reason_for_violation', 'N/A')}\n\n"
@@ -494,7 +495,6 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             errors_found = []
             while not results_queue.empty():
                 result_list = results_queue.get()
-                # FIX: The loop should iterate over 'result_list', not 'result'
                 for result_item in result_list:
                     if isinstance(result_item, dict) and result_item.get("error"):
                         errors_found.append(result_item)

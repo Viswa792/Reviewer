@@ -1,4 +1,4 @@
-# app.py (Maximum Accuracy & Consistency Version - with Token-Efficient Preprocessing)
+# app.py (Maximum Accuracy & Consistency Version - v2)
 import json
 import os
 import re 
@@ -79,7 +79,8 @@ def find_and_unzip(zip_path, extract_folder):
 def call_gemini_api(prompt, system_prompt=None, model_obj=None):
     time.sleep(RATE_LIMIT)
     
-    response = model_obj.generate_content(prompt, request_options={'timeout': 600})
+    # Set a more reasonable timeout of 5 minutes (300 seconds)
+    response = model_obj.generate_content(prompt, request_options={'timeout': 300})
     
     if not response.parts:
         try:
@@ -104,14 +105,8 @@ def load_notebook_cells(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f).get('cells', [])
 
-# --- TOKEN-EFFICIENT PREPROCESSING ---
 def preprocess_notebook(cells):
-    """
-    Converts notebook cells into a token-efficient list of dictionaries,
-    removing repetitive keys like 'turn_x' and 'cell_number'.
-    """
     processed_list = []
-    # Mapping from your specific roles to more generic, token-friendly names
     role_map = {
         "user_query": "user",
         "assistant_response": "assistant",
@@ -127,16 +122,14 @@ def preprocess_notebook(cells):
         source = "".join(cell.get('source', []))
         role = "unknown"
         
-        # Determine the role based on markers
         for marker, mapped_role in role_map.items():
             if marker in source:
                 role = mapped_role
                 break
         
-        # Only include cells that have a recognized role
         if role != "unknown":
             processed_list.append({
-                "cell": i + 1, # Keep cell number for reference inside the object
+                "cell": i + 1,
                 "role": role,
                 "content": source
             })
@@ -181,7 +174,6 @@ def extract_json_from_response(response_text):
 
 # --- PROMPT ENGINEERING & REPORTING ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
-    # This prompt is updated to reflect the new, more efficient notebook structure.
     return f"""Your task is to act as a specialized AI auditor operating in a "Chain of Thought" mode. For every potential violation you identify, you MUST first articulate your step-by-step reasoning in the `thinking_process` field before summarizing the issue. Your response must be a single, valid JSON object and NOTHING ELSE.
 
 **Your Sole Focus: The "{guideline_name}" Guideline**
@@ -192,7 +184,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 **Mandatory Instructions:**
 1.  **Adopt a "Thinking Mode":** Before making any conclusion, you must think step-by-step.
 2.  **Analyze Carefully:** Review the entire notebook for violations of ONLY the guideline specified above. The notebook is provided as a list of cell objects.
-3.  **Mandatory Thinking Process:** For each violation, you MUST fill the `thinking_process` field with your detailed, step-by-step reasoning. Explain *why* you believe it's a violation based on the guideline.
+3.  **Mandatory Thinking Process:** For each violation, you MUST fill the `thinking_process` field with your detailed, step-by-step reasoning. Keep your reasoning clear but concise.
 4.  **Concise Issue Description:** After your thinking process, provide a clear and concise `issue_description`.
 5.  **No Violations:** If you find NO violations, you MUST return an empty `findings` array: `"findings": []`.
 6.  **Strict JSON:** Your entire output must be a single, valid JSON object. Do not include any conversational text.
@@ -316,7 +308,7 @@ def run_review_task(queue, model_obj, guideline_name, guideline_content, structu
                 break 
             
             if len(temp_notebook_data) > 1:
-                temp_notebook_data.pop() # Remove the last cell from the list
+                temp_notebook_data.pop()
             else:
                 raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
 
@@ -385,7 +377,7 @@ def run_audit_workflow(task_number, status_placeholder):
             
             for thread in threads: 
                 thread.join()
-            status_placeholder.info("✅ All review threads finished.")
+            status_placeholder.info("✅ All review threads finished. Aggregating results...")
 
             errors_found, warnings_found = [], []
             while not results_queue.empty():

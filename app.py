@@ -1,4 +1,4 @@
-# app.py (Final High-Accuracy & Consistency Version - v4 with Tiered Optimization)
+# app.py (Final High-Accuracy & Consistency Version - v5 with Firebase Fix)
 import json
 import os
 import re 
@@ -11,6 +11,8 @@ import zipfile
 import google.generativeai as genai
 import streamlit as st
 import tempfile
+import firebase_admin
+from firebase_admin import credentials, firestore
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -24,7 +26,6 @@ RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 COST_LOG_FILE = 'audit_log.csv'
 MAX_RUNS_PER_TASK = 2
-# This limit is now only used to decide whether to skip the 'structure' guideline.
 TOKEN_LIMIT = 199000
 usage_lock = threading.Lock()
 
@@ -307,8 +308,26 @@ def generate_final_report(validation_result, notebook_name):
 def run_review_task(queue, model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock):
     try:
         system_prompt = "You are a meticulous AI Notebook Auditor..."
-        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
         
+        temp_notebook_data = json.loads(structured_notebook)
+        
+        while True:
+            current_notebook_str = json.dumps(temp_notebook_data)
+            prompt = build_targeted_review_prompt(current_notebook_str, guideline_name, guideline_content)
+            
+            token_count = model_obj.count_tokens(prompt).total_tokens
+            
+            if token_count <= TOKEN_LIMIT:
+                if len(current_notebook_str) < len(structured_notebook):
+                    queue.put([{"warning": f"Input for '{guideline_name}' review was truncated to fit within the token limit."}])
+                break 
+            
+            if len(temp_notebook_data) > 1:
+                last_turn_key = sorted(temp_notebook_data.keys())[-1]
+                del temp_notebook_data[last_turn_key]
+            else:
+                raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
+
         response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model_obj=model_obj)
         
         with token_lock:
@@ -363,11 +382,9 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             all_guidelines = load_guidelines("./Guidlines")
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
-            # --- TIERED OPTIMIZATION LOGIC ---
             warnings_found = []
             review_queue = list(all_guidelines.items())
 
-            # Estimate the token count for a worst-case prompt
             longest_guideline_content = max(all_guidelines.values(), key=len) if all_guidelines else ""
             worst_case_prompt = build_targeted_review_prompt(structured_notebook, "worst_case", longest_guideline_content)
             worst_case_token_count = review_model_obj.count_tokens(worst_case_prompt).total_tokens
@@ -375,7 +392,6 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             if worst_case_token_count > TOKEN_LIMIT:
                 status_placeholder.warning("⚠️ Large notebook detected. Attempting Tier 1 optimization...")
                 
-                # Tier 1: Remove the 'structure' guideline if it exists
                 original_len = len(review_queue)
                 review_queue = [item for item in review_queue if item[0] != 'structure']
                 

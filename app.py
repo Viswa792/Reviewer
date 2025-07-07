@@ -382,7 +382,7 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             notebook_name = os.path.basename(notebook_path)
             cells = load_notebook_cells(notebook_path)
             structured_notebook = preprocess_notebook(cells)
-            all_guidelines = load_guidelines("./Guidlines")
+            all_guidelines = load_guidelines("./Guidelines")
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
             status_placeholder.info("[2/5] Kicking off individual parallel reviews...")

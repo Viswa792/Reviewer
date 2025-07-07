@@ -460,7 +460,7 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                         all_findings.append(result)
             
             if errors_found:
-                return None, None, errors_found, {}, []
+                return None, None, errors_found, {}, [], 0
 
             status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
             status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
@@ -512,10 +512,10 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             log_audit_to_firestore(db_client, log_entry)
             
             status_placeholder.success("🎉 Audit Complete!")
-            return final_report, report_filename, [], final_token_summary, []
+            return final_report, report_filename, [], final_token_summary, [], total_cost_inr
         
     except Exception as e:
-        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}, []
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}, [], 0
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
@@ -534,7 +534,7 @@ if __name__ == "__main__":
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
             with st.spinner("Executing audit..."):
-                final_report_md, report_filename, errors, token_summary, warnings = run_audit_workflow(task_number, status_placeholder, db)
+                final_report_md, report_filename, errors, token_summary, warnings, total_cost_inr = run_audit_workflow(task_number, status_placeholder, db)
             
             if warnings:
                 for warning_msg in set(warnings):

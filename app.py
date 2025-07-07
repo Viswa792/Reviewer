@@ -19,8 +19,8 @@ from datetime import datetime
 
 # --- CONFIGURATION FOR MAXIMUM ACCURACY ---
 load_dotenv()
-REVIEW_MODEL = "gemini-pro" 
-VALIDATION_MODEL = "gemini-1.5-flash"
+REVIEW_MODEL = "gemini-2.5-pro"
+VALIDATION_MODEL = "gemini-2.5-flash"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2

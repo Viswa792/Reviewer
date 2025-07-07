@@ -1,4 +1,4 @@
-# app.py (Final Version with Permanent Firestore Logging)
+# app.py (Final High-Accuracy & Consistency Version - v4 with Tiered Optimization)
 import json
 import os
 import re 
@@ -11,8 +11,6 @@ import zipfile
 import google.generativeai as genai
 import streamlit as st
 import tempfile
-import firebase_admin
-from firebase_admin import credentials, firestore
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -24,7 +22,9 @@ REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
+COST_LOG_FILE = 'audit_log.csv'
 MAX_RUNS_PER_TASK = 2
+# This limit is now only used to decide whether to skip the 'structure' guideline.
 TOKEN_LIMIT = 199000
 usage_lock = threading.Lock()
 
@@ -35,14 +35,10 @@ USD_TO_INR_EXCHANGE_RATE = 85.0
 
 # --- FIRESTORE INITIALIZATION ---
 def initialize_firestore():
-    """Initializes the Firestore client if not already done."""
     try:
-        # Check if the app is already initialized
         firebase_admin.get_app()
     except ValueError:
-        # If not initialized, do it now using Streamlit secrets
         try:
-            # The service account key is stored as a JSON string in secrets
             service_account_info = json.loads(st.secrets["FIREBASE_SERVICE_ACCOUNT"])
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
@@ -75,7 +71,7 @@ class DataDownloader:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"A network error occurred during download: {e}")
 
-# --- USAGE TRACKER FUNCTIONS ---
+# --- USAGE & COST TRACKER FUNCTIONS ---
 def read_usage_tracker():
     with usage_lock:
         if not os.path.exists(USAGE_TRACKER_FILE):
@@ -92,7 +88,6 @@ def write_usage_tracker(data):
             json.dump(data, f, indent=4)
 
 def log_audit_to_firestore(db_client, log_data):
-    """Adds a new document to the 'audit_logs' collection in Firestore."""
     if db_client:
         try:
             db_client.collection('audit_logs').add(log_data)
@@ -312,26 +307,8 @@ def generate_final_report(validation_result, notebook_name):
 def run_review_task(queue, model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock):
     try:
         system_prompt = "You are a meticulous AI Notebook Auditor..."
+        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
         
-        temp_notebook_data = json.loads(structured_notebook)
-        
-        while True:
-            current_notebook_str = json.dumps(temp_notebook_data)
-            prompt = build_targeted_review_prompt(current_notebook_str, guideline_name, guideline_content)
-            
-            token_count = model_obj.count_tokens(prompt).total_tokens
-            
-            if token_count <= TOKEN_LIMIT:
-                if len(current_notebook_str) < len(structured_notebook):
-                    queue.put([{"warning": f"Input for '{guideline_name}' review was truncated to fit within the token limit."}])
-                break 
-            
-            if len(temp_notebook_data) > 1:
-                last_turn_key = sorted(temp_notebook_data.keys())[-1]
-                del temp_notebook_data[last_turn_key]
-            else:
-                raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
-
         response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model_obj=model_obj)
         
         with token_lock:
@@ -375,7 +352,7 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=generation_config, safety_settings=safety_settings)
             validation_model_obj = genai.GenerativeModel(VALIDATION_MODEL, generation_config=generation_config, safety_settings=safety_settings)
 
-            status_placeholder.info(f"[1/5] Downloading & Preprocessing...")
+            status_placeholder.info(f"[1/6] Downloading & Preprocessing...")
             notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
             downloader = DataDownloader(AUTH_TOKEN)
             zip_path = downloader.download_zip_file(notebook_zip_url, temp_dir)
@@ -386,10 +363,32 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             all_guidelines = load_guidelines("./Guidlines")
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
-            status_placeholder.info("[2/5] Kicking off individual parallel reviews...")
+            # --- TIERED OPTIMIZATION LOGIC ---
+            warnings_found = []
+            review_queue = list(all_guidelines.items())
+
+            # Estimate the token count for a worst-case prompt
+            longest_guideline_content = max(all_guidelines.values(), key=len) if all_guidelines else ""
+            worst_case_prompt = build_targeted_review_prompt(structured_notebook, "worst_case", longest_guideline_content)
+            worst_case_token_count = review_model_obj.count_tokens(worst_case_prompt).total_tokens
+
+            if worst_case_token_count > TOKEN_LIMIT:
+                status_placeholder.warning("⚠️ Large notebook detected. Attempting Tier 1 optimization...")
+                
+                # Tier 1: Remove the 'structure' guideline if it exists
+                original_len = len(review_queue)
+                review_queue = [item for item in review_queue if item[0] != 'structure']
+                
+                if len(review_queue) < original_len:
+                    warnings_found.append("Input is too large. The 'structure' guideline review was skipped to prioritize accuracy on other checks.")
+                    status_placeholder.info("✅ Tier 1 Optimization: Skipped 'structure' guideline.")
+                else:
+                    status_placeholder.info("Could not apply Tier 1 optimization ('structure' guideline not found).")
+
+            status_placeholder.info("[2/6] Kicking off individual parallel reviews...")
             all_findings, results_queue = [], Queue()
             threads, token_counts, token_lock = [], [], threading.Lock()
-            for guideline_name, guideline_content in all_guidelines.items():
+            for guideline_name, guideline_content in review_queue:
                 status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
                 thread = threading.Thread(target=run_review_task, args=(results_queue, review_model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock))
                 threads.append(thread); thread.start()
@@ -399,7 +398,7 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                 thread.join()
             status_placeholder.info("✅ All review threads finished. Aggregating results...")
 
-            errors_found, warnings_found = [], []
+            errors_found = []
             while not results_queue.empty():
                 result_list = results_queue.get()
                 for result in result_list:
@@ -413,8 +412,8 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             if errors_found:
                 return None, None, errors_found, {}, []
 
-            status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
-            status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
+            status_placeholder.info(f"[3/6] Aggregated {len(all_findings)} findings.")
+            status_placeholder.info(f"[4/6] Running final validation with {VALIDATION_MODEL}...")
             
             validation_token_dict = {'input': 0, 'output': 0}
             if not all_findings:
@@ -436,21 +435,23 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                 'total': grand_total
             }
 
-            status_placeholder.info("[5/5] Generating final report...")
+            status_placeholder.info("[5/6] Generating final report...")
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
+            status_placeholder.info("[6/6] Logging audit results...")
             cost_usd = ((total_input_tokens / 1_000_000) * PRICE_PER_MILLION_INPUT_TOKENS_USD) + \
                        ((total_output_tokens / 1_000_000) * PRICE_PER_MILLION_OUTPUT_TOKENS_USD)
             cost_inr = cost_usd * USD_TO_INR_EXCHANGE_RATE
             
             log_entry = {
-                "timestamp": datetime.now(), # Firestore handles timestamps natively
+                "timestamp": datetime.now(),
                 "task_number": task_number,
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
                 "total_tokens": grand_total,
-                "estimated_cost_inr": cost_inr
+                "estimated_cost_inr": cost_inr,
+                "warnings": warnings_found
             }
             log_audit_to_firestore(db_client, log_entry)
             
@@ -466,7 +467,6 @@ if __name__ == "__main__":
     st.title("🤖 AI Notebook Auditor")
     st.markdown("Enter a task number to perform a multi-model review. Each task can be reviewed a maximum of two times.")
     
-    # Initialize Firestore at the start of the app
     db = initialize_firestore()
 
     task_number = st.text_input("Enter the Task Number:", placeholder="e.g., 214514")

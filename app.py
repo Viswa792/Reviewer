@@ -1,4 +1,4 @@
-# app.py (High-Accuracy Professional Version - v5 with Safety Filter Handling)
+# app.py (High-Accuracy Professional Version - v6 with Increased Token Limit)
 import json
 import os
 import requests
@@ -78,16 +78,16 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     time.sleep(RATE_LIMIT)
     safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
     
+    new_token_limit = 16384
+
     if "flash" in model:
-        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=8192)
+        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=new_token_limit)
     else:
-        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=8192, response_mime_type="application/json")
+        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=new_token_limit, response_mime_type="application/json")
     
     model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
     
-    # --- FIX FOR SAFETY FILTER ERROR ---
-    # Check if the response was blocked before trying to access .text
     if not response.parts:
         try:
             finish_reason = response.candidates[0].finish_reason.name

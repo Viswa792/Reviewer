@@ -1,7 +1,4 @@
-# app.py (Cost-Optimized Version - With Usage Limits and JSON Fix)
-# Final version as of Monday, July 8, 2024.
-# Implements batched reviews and a 2-run limit per task.
-# Accuracy-focused prompt update.
+# app.py (High-Accuracy Professional Version)
 import json
 import os
 import requests
@@ -19,11 +16,11 @@ from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
 load_dotenv()
+REVIEW_MODEL = "gemini-2.5-flash"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2
-# A lock to prevent race conditions when updating the usage tracker file
 usage_lock = threading.Lock()
 
 # --- DATA DOWNLOADER CLASS ---
@@ -52,7 +49,6 @@ class DataDownloader:
 
 # --- USAGE TRACKER FUNCTIONS ---
 def read_usage_tracker():
-    """Safely reads the usage tracker JSON file."""
     with usage_lock:
         if not os.path.exists(USAGE_TRACKER_FILE):
             return {}
@@ -63,7 +59,6 @@ def read_usage_tracker():
             return {}
 
 def write_usage_tracker(data):
-    """Safely writes to the usage tracker JSON file."""
     with usage_lock:
         with open(USAGE_TRACKER_FILE, 'w') as f:
             json.dump(data, f, indent=4)
@@ -131,54 +126,43 @@ def extract_json_from_response(response_text):
     raise ValueError(f"JSON Parsing Failed. Raw Text: {response_text}")
 
 # --- PROMPT ENGINEERING & REPORTING ---
-def build_batched_review_prompt(structured_notebook, guideline_batch):
-    guideline_names = list(guideline_batch.keys())
-    
-    # Create the detailed breakdown of guidelines for the prompt
-    guideline_section = ""
-    for i, (name, content) in enumerate(guideline_batch.items()):
-        guideline_section += f"Guideline {i+1}: **{name}**\n---\n{content}\n---\n\n"
+def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
+    return f"""Your task is to act as a specialized AI auditor operating in a "Chain of Thought" mode. For every potential violation you identify, you MUST first articulate your step-by-step reasoning in the `thinking_process` field before summarizing the issue. Your response must be a single, valid JSON object and NOTHING ELSE.
 
-    # Create the sequential analysis instruction
-    analysis_steps = ""
-    for i, name in enumerate(guideline_names):
-        analysis_steps += f"{i+1}. First, review the entire notebook ONLY for violations of the **{name}** guideline.\n"
-    analysis_steps += f"{len(guideline_names)+1}. Finally, combine all findings from all guidelines into a single `findings` array in your final JSON output."
+**Your Sole Focus: The "{guideline_name}" Guideline**
+---
+{guideline_content}
+---
 
+**Mandatory Instructions:**
+1.  **Adopt a "Thinking Mode":** Before making any conclusion, you must think step-by-step.
+2.  **Analyze Carefully:** Review the entire notebook for violations of ONLY the guideline specified above.
+3.  **Mandatory Thinking Process:** For each violation, you MUST fill the `thinking_process` field with your detailed, step-by-step reasoning. Explain *why* you believe it's a violation based on the guideline.
+4.  **Concise Issue Description:** After your thinking process, provide a clear and concise `issue_description`.
+5.  **No Violations:** If you find NO violations, you MUST return an empty `findings` array: `"findings": []`.
+6.  **Strict JSON:** Your entire output must be a single, valid JSON object. Do not include any conversational text.
 
-    return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a batch of guidelines by following a strict, sequential process.
-Your response MUST be a single, valid JSON object and NOTHING ELSE.
+**Output Examples:**
 
-**Guidelines for Review:**
-{guideline_section}
-
-**Mandatory Sequential Analysis Instructions:**
-You must perform the analysis in this exact order:
-{analysis_steps}
-
-**Output Format Rules:**
-1.  For each finding, you MUST include the `violation_category` key, specifying which guideline was violated (e.g., "hallucination", "logical").
-2.  If you find multiple findings, ensure there is a comma separating each JSON object in the `findings` array.
-3.  If you find NO violations for ANY of the provided guidelines, you MUST return an empty `findings` array: `"findings": []`.
-4.  Your response MUST conform to the JSON schema in the example.
-
-**Output Example:**
+*Example 1: If you find violations*
 ```json
 {{
+  "guideline": "{guideline_name}",
   "findings": [
     {{
-      "violation_category": "hallucination",
       "cell_number": 5,
-      "thinking_process": "The user asked for the capital of France. The model responded with \\"The capital of France is Berlin.\\". This is a factual error under the hallucination guideline.",
-      "issue_description": "In cell 5, the model incorrectly states that the capital of France is Berlin."
-    }},
-    {{
-      "violation_category": "structure",
-      "cell_number": 8,
-      "thinking_process": "The code in cell 8 is poorly formatted and lacks comments, making it hard to understand. This violates the structure guideline.",
-      "issue_description": "The code in cell 8 should be formatted according to PEP 8 standards and include comments explaining its purpose."
+      "thinking_process": "Step 1: I am checking for factual errors under the 'hallucination' guideline. Step 2: I see the model claims the capital of France is Berlin. Step 3: I know the correct capital is Paris. Step 4: Therefore, this is a clear factual error and a violation.",
+      "issue_description": "In cell 5, the model incorrectly states that the capital of France is Berlin. The correct capital is Paris."
     }}
   ]
+}}
+```
+
+*Example 2: If you find NO violations*
+```json
+{{
+  "guideline": "{guideline_name}",
+  "findings": []
 }}
 ```
 
@@ -187,7 +171,7 @@ You must perform the analysis in this exact order:
 {structured_notebook}
 ---
 
-Begin your sequential analysis now. Your final output MUST BE the JSON object and nothing more.
+Begin your analysis now. Remember to use your "Thinking Mode" for every review. Your final output MUST BE the JSON object and nothing more.
 """
 
 def build_validation_prompt(structured_notebook, all_findings):
@@ -253,33 +237,35 @@ def generate_final_report(validation_result, notebook_name):
     report += "\n*Report generated with a multi-model audit via Google Gemini.*"
     return report
 
-# --- WORKER FUNCTION (ADAPTED FOR BATCHES) ---
-def run_batched_review_task(queue, structured_notebook, model_name, guideline_batch):
+# --- WORKER FUNCTION (FOR INDIVIDUAL REVIEWS) ---
+def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content):
     try:
-        guideline_names = list(guideline_batch.keys())
-        system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a batch of guidelines and return findings in a strict JSON format, tagging each finding with its violation category."
-        prompt = build_batched_review_prompt(structured_notebook, guideline_batch)
+        system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a specific guideline and return findings in a strict JSON format, following the examples provided in the user prompt."
+        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
         response = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
         findings_data = extract_json_from_response(response)
-        if findings_data and "findings" in findings_data:
+        
+        if findings_data and "findings" not in findings_data:
+            queue.put([])
+        elif findings_data and "findings" in findings_data:
             findings = findings_data.get("findings", [])
             for finding in findings:
                 finding["auditor_model"] = model_name
+                finding["violation_category"] = guideline_name 
             queue.put(findings)
         else:
-            queue.put([])
+            raise ValueError("Response was not a valid JSON object or was empty.")
+            
     except Exception as e:
-        queue.put([{"error": True, "guideline": f"Batch: {', '.join(guideline_names)}", "model": model_name, "message": str(e), "traceback": traceback.format_exc()}])
+        queue.put([{"error": True, "guideline": guideline_name, "model": model_name, "message": str(e), "traceback": traceback.format_exc()}])
 
-# --- MAIN WORKFLOW FUNCTION (WITH USAGE LIMIT) ---
+# --- MAIN WORKFLOW FUNCTION ---
 def run_audit_workflow(task_number, status_placeholder):
-    # --- USAGE LIMIT CHECK ---
     usage_data = read_usage_tracker()
     run_count = usage_data.get(str(task_number), 0)
     if run_count >= MAX_RUNS_PER_TASK:
         raise PermissionError(f"Task {task_number} has already been reviewed the maximum number of times ({MAX_RUNS_PER_TASK}).")
     
-    # If check passes, increment and save before starting the long process
     usage_data[str(task_number)] = run_count + 1
     write_usage_tracker(usage_data)
     
@@ -301,18 +287,10 @@ def run_audit_workflow(task_number, status_placeholder):
             all_guidelines = load_guidelines("./Guidlines")
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
-            status_placeholder.info("[2/5] Setting up review batches...")
-            batches = [
-                {"model": "gemini-2.5-pro", "guidelines": {"hallucination": all_guidelines.get("hallucination", ""),"logical": all_guidelines.get("logical", "")}},
-                {"model": "gemini-2.5-flash", "guidelines": {"thinking": all_guidelines.get("thinking", ""),"thought": all_guidelines.get("thought", "")}},
-                {"model": "gemini-1.5-pro", "guidelines": {"tools": all_guidelines.get("tools", ""), "structure": all_guidelines.get("structure", "")}}
-            ]
-            status_placeholder.info("✅ Batches configured.")
-
-            status_placeholder.info("[3/5] Kicking off batched parallel reviews...")
+            status_placeholder.info("[2/5] Kicking off individual parallel reviews...")
             all_findings, results_queue, threads = [], Queue(), []
-            for batch in batches:
-                thread = threading.Thread(target=run_batched_review_task, args=(results_queue, structured_notebook, batch["model"], batch["guidelines"]))
+            for guideline_name, guideline_content in all_guidelines.items():
+                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, REVIEW_MODEL, guideline_name, guideline_content))
                 threads.append(thread); thread.start()
                 time.sleep(1)
             for thread in threads: thread.join()
@@ -330,9 +308,10 @@ def run_audit_workflow(task_number, status_placeholder):
             if errors_found:
                 return None, None, errors_found
 
+            status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
             status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
             if not all_findings:
-                validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by any of the specialized auditors."}
+                validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
             else:
                 validation_prompt = build_validation_prompt(structured_notebook, all_findings)
                 response = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
@@ -348,14 +327,13 @@ def run_audit_workflow(task_number, status_placeholder):
             return final_report, report_filename, []
         
         except Exception as e:
-            # This will now catch the PermissionError from the usage limit check
             return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
     st.set_page_config(page_title="AI Notebook Auditor", layout="wide")
-    st.title("🤖 AI Notebook Auditor (Cost Optimized)")
-    st.markdown("Enter a task number to perform a batched, multi-model review. Each task can be reviewed a maximum of two times.")
+    st.title("🤖 AI Notebook Auditor")
+    st.markdown("Enter a task number to perform a multi-model review. Each task can be reviewed a maximum of two times.")
     
     task_number = st.text_input("Enter the Task Number:", placeholder="e.g., 214514")
 
@@ -363,18 +341,16 @@ if __name__ == "__main__":
         if task_number and task_number.isdigit():
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
-            with st.spinner("Executing cost-optimized audit..."):
+            with st.spinner("Executing audit..."):
                 final_report_md, report_filename, errors = run_audit_workflow(task_number, status_placeholder)
             
             if errors:
                 st.error("The audit could not be completed:")
                 for error in errors:
-                    # Don't show a subheader if it's a pre-flight check error
                     if error.get('guideline') != 'Pre-flight Check':
                         st.subheader(f"Error during: `{error.get('guideline', 'Unknown Step')}` review (Model: `{error.get('model', 'N/A')}`)")
                     st.write("**Message:**")
                     st.code(error.get('message', 'No message.'), language='text')
-                    # Optionally hide traceback for user-facing errors like permission denied
                     if "PermissionError" not in error.get('traceback', ''):
                         st.write("**Full Traceback:**")
                         st.code(error.get('traceback', 'No traceback.'), language='text')

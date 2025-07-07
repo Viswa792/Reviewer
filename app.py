@@ -1,4 +1,4 @@
-# app.py (High-Accuracy Professional Version - v3 with Token Tracking)
+# app.py (High-Accuracy Professional Version - v4 with Granular Token Tracking)
 import json
 import os
 import requests
@@ -86,15 +86,14 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
     
-    total_tokens = 0
+    token_dict = {'input': 0, 'output': 0}
     try:
-        prompt_tokens = response.usage_metadata.prompt_token_count
-        candidates_tokens = response.usage_metadata.candidates_token_count
-        total_tokens = prompt_tokens + candidates_tokens
+        token_dict['input'] = response.usage_metadata.prompt_token_count
+        token_dict['output'] = response.usage_metadata.candidates_token_count
     except Exception:
         pass
         
-    return response.text, total_tokens
+    return response.text, token_dict
 
 def load_notebook_cells(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -256,10 +255,10 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
     try:
         system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a specific guideline and return findings in a strict JSON format, following the examples provided in the user prompt."
         prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
-        response_text, tokens = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
+        response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
         
         with token_lock:
-            token_counts.append(tokens)
+            token_counts.append(token_dict)
 
         findings_data = extract_json_from_response(response_text)
         
@@ -328,32 +327,41 @@ def run_audit_workflow(task_number, status_placeholder):
                         all_findings.append(result)
             
             if errors_found:
-                return None, None, errors_found, 0
+                return None, None, errors_found, {}
 
             status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
             status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
             
-            validation_tokens = 0
+            validation_token_dict = {'input': 0, 'output': 0}
             if not all_findings:
                 validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
             else:
                 validation_prompt = build_validation_prompt(structured_notebook, all_findings)
-                response_text, validation_tokens = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
+                response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
                 validation_result = extract_json_from_response(response_text) if response_text else None
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
-            total_tokens = sum(token_counts) + validation_tokens
+            # Aggregate all token counts
+            total_input_tokens = sum(d['input'] for d in token_counts) + validation_token_dict['input']
+            total_output_tokens = sum(d['output'] for d in token_counts) + validation_token_dict['output']
+            grand_total = total_input_tokens + total_output_tokens
+
+            final_token_summary = {
+                'input': total_input_tokens,
+                'output': total_output_tokens,
+                'total': grand_total
+            }
 
             status_placeholder.info("[5/5] Generating final report...")
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
             status_placeholder.success("🎉 Audit Complete!")
-            return final_report, report_filename, [], total_tokens
+            return final_report, report_filename, [], final_token_summary
         
     except Exception as e:
-        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], 0
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
@@ -368,7 +376,7 @@ if __name__ == "__main__":
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
             with st.spinner("Executing audit..."):
-                final_report_md, report_filename, errors, total_tokens = run_audit_workflow(task_number, status_placeholder)
+                final_report_md, report_filename, errors, token_summary = run_audit_workflow(task_number, status_placeholder)
             
             if errors:
                 st.error("The audit could not be completed:")
@@ -384,7 +392,7 @@ if __name__ == "__main__":
                         st.code(error.get('traceback', 'No traceback.'), language='text')
 
             elif final_report_md:
-                st.info(f"📊 **Total Tokens Used for this Audit:** {total_tokens:,}")
+                st.info(f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}**")
                 st.balloons()
                 st.header("Generated Review Content")
                 st.markdown(final_report_md)

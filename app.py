@@ -1,4 +1,4 @@
-# app.py (Maximum Accuracy & Consistency Version - v2)
+# app.py (Maximum Accuracy & Consistency Version - v3 with Cost Logging)
 import json
 import os
 import re 
@@ -14,6 +14,7 @@ import tempfile
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from datetime import datetime
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -21,9 +22,18 @@ REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
+COST_LOG_FILE = 'audit_log.csv'
 MAX_RUNS_PER_TASK = 2
 TOKEN_LIMIT = 190000
 usage_lock = threading.Lock()
+
+# --- PRICING CONSTANTS FOR COST ESTIMATION ---
+# Based on high-end model pricing (e.g., GPT-4o, Gemini Advanced tiers)
+# These are estimates. Replace with your actual contract pricing if available.
+# Prices are per 1 million tokens.
+PRICE_PER_MILLION_INPUT_TOKENS_USD = 1.50 
+PRICE_PER_MILLION_OUTPUT_TOKENS_USD = 7.50
+USD_TO_INR_EXCHANGE_RATE = 85.0 
 
 # --- DATA DOWNLOADER CLASS ---
 class DataDownloader:
@@ -49,7 +59,7 @@ class DataDownloader:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"A network error occurred during download: {e}")
 
-# --- USAGE TRACKER FUNCTIONS ---
+# --- USAGE & COST TRACKER FUNCTIONS ---
 def read_usage_tracker():
     with usage_lock:
         if not os.path.exists(USAGE_TRACKER_FILE):
@@ -64,6 +74,18 @@ def write_usage_tracker(data):
     with usage_lock:
         with open(USAGE_TRACKER_FILE, 'w') as f:
             json.dump(data, f, indent=4)
+
+def log_audit_to_csv(log_data):
+    """Appends a new record to the cost and usage log file."""
+    with usage_lock:
+        file_exists = os.path.isfile(COST_LOG_FILE)
+        with open(COST_LOG_FILE, 'a', newline='') as f:
+            # Write header only if the file is new
+            if not file_exists:
+                f.write("timestamp,task_number,input_tokens,output_tokens,total_tokens,estimated_cost_inr\n")
+            
+            # Write the data row
+            f.write(f"{log_data['timestamp']},{log_data['task_number']},{log_data['input_tokens']},{log_data['output_tokens']},{log_data['total_tokens']},{log_data['estimated_cost_inr']:.4f}\n")
 
 # --- UTILITY AND LOGIC FUNCTIONS ---
 def find_and_unzip(zip_path, extract_folder):
@@ -419,6 +441,21 @@ def run_audit_workflow(task_number, status_placeholder):
             status_placeholder.info("[5/5] Generating final report...")
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
+            
+            # --- COST LOGGING ---
+            cost_usd = ((total_input_tokens / 1_000_000) * PRICE_PER_MILLION_INPUT_TOKENS_USD) + \
+                       ((total_output_tokens / 1_000_000) * PRICE_PER_MILLION_OUTPUT_TOKENS_USD)
+            cost_inr = cost_usd * USD_TO_INR_EXCHANGE_RATE
+            
+            log_entry = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "task_number": task_number,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "total_tokens": grand_total,
+                "estimated_cost_inr": cost_inr
+            }
+            log_audit_to_csv(log_entry)
             
             status_placeholder.success("🎉 Audit Complete!")
             return final_report, report_filename, [], final_token_summary, warnings_found

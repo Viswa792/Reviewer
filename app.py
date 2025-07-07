@@ -1,4 +1,4 @@
-# app.py (High-Accuracy Professional Version - v2)
+# app.py (High-Accuracy Professional Version - v3 with Token Tracking)
 import json
 import os
 import requests
@@ -85,7 +85,16 @@ def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
     
     model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
-    return response.text
+    
+    total_tokens = 0
+    try:
+        prompt_tokens = response.usage_metadata.prompt_token_count
+        candidates_tokens = response.usage_metadata.candidates_token_count
+        total_tokens = prompt_tokens + candidates_tokens
+    except Exception:
+        pass
+        
+    return response.text, total_tokens
 
 def load_notebook_cells(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -141,6 +150,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 4.  **Concise Issue Description:** After your thinking process, provide a clear and concise `issue_description`.
 5.  **No Violations:** If you find NO violations, you MUST return an empty `findings` array: `"findings": []`.
 6.  **Strict JSON:** Your entire output must be a single, valid JSON object. Do not include any conversational text.
+7.  **CRITICAL JSON SYNTAX:** If the `findings` array contains more than one object, you MUST place a comma (`,`) between each object.
 
 **Output Examples:**
 
@@ -153,6 +163,10 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
       "cell_number": 5,
       "thinking_process": "Step 1: I am checking for factual errors under the 'hallucination' guideline. Step 2: I see the model claims the capital of France is Berlin. Step 3: I know the correct capital is Paris. Step 4: Therefore, this is a clear factual error and a violation.",
       "issue_description": "In cell 5, the model incorrectly states that the capital of France is Berlin. The correct capital is Paris."
+    }}, {{
+      "cell_number": 12,
+      "thinking_process": "Step 1: The model invented a function `calculate_gdp()` that does not exist in the pandas library. Step 2: This is a fabrication and a violation of the hallucination guideline.",
+      "issue_description": "The model invented a non-existent function `calculate_gdp()` in cell 12."
     }}
   ]
 }}
@@ -171,7 +185,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 {structured_notebook}
 ---
 
-Begin your analysis now. Remember to use your "Thinking Mode" for every review. Your final output MUST BE the JSON object and nothing more.
+Begin your analysis now. Remember to use your "Thinking Mode" and pay close attention to JSON syntax, especially commas. Your final output MUST BE the JSON object and nothing more.
 """
 
 def build_validation_prompt(structured_notebook, all_findings):
@@ -238,12 +252,16 @@ def generate_final_report(validation_result, notebook_name):
     return report
 
 # --- WORKER FUNCTION (FOR INDIVIDUAL REVIEWS) ---
-def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content):
+def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content, token_counts, token_lock):
     try:
         system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a specific guideline and return findings in a strict JSON format, following the examples provided in the user prompt."
         prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
-        response = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
-        findings_data = extract_json_from_response(response)
+        response_text, tokens = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
+        
+        with token_lock:
+            token_counts.append(tokens)
+
+        findings_data = extract_json_from_response(response_text)
         
         if findings_data and "findings" not in findings_data:
             queue.put([])
@@ -262,13 +280,11 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
 # --- MAIN WORKFLOW FUNCTION ---
 def run_audit_workflow(task_number, status_placeholder):
     try:
-        # --- FIX: Moved usage check inside the main try...except block ---
         usage_data = read_usage_tracker()
         run_count = usage_data.get(str(task_number), 0)
         if run_count >= MAX_RUNS_PER_TASK:
             raise PermissionError(f"Task {task_number} has already been reviewed the maximum number of times ({MAX_RUNS_PER_TASK}).")
         
-        # If check passes, increment and save before starting the long process
         usage_data[str(task_number)] = run_count + 1
         write_usage_tracker(usage_data)
     
@@ -290,15 +306,14 @@ def run_audit_workflow(task_number, status_placeholder):
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
             status_placeholder.info("[2/5] Kicking off individual parallel reviews...")
-            all_findings, results_queue, threads = [], Queue(), []
+            all_findings, results_queue = [], Queue()
+            threads, token_counts, token_lock = [], [], threading.Lock()
             for guideline_name, guideline_content in all_guidelines.items():
-                # --- NEW: Interactive logging for each dispatched task ---
                 status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
-                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, REVIEW_MODEL, guideline_name, guideline_content))
+                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, REVIEW_MODEL, guideline_name, guideline_content, token_counts, token_lock))
                 threads.append(thread); thread.start()
                 time.sleep(1)
             
-            # Wait for all threads to complete their work
             for thread in threads: 
                 thread.join()
             status_placeholder.info("✅ All review threads finished.")
@@ -313,28 +328,32 @@ def run_audit_workflow(task_number, status_placeholder):
                         all_findings.append(result)
             
             if errors_found:
-                return None, None, errors_found
+                return None, None, errors_found, 0
 
             status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
             status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
+            
+            validation_tokens = 0
             if not all_findings:
                 validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
             else:
                 validation_prompt = build_validation_prompt(structured_notebook, all_findings)
-                response = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
-                validation_result = extract_json_from_response(response) if response else None
+                response_text, validation_tokens = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
+                validation_result = extract_json_from_response(response_text) if response_text else None
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
+            total_tokens = sum(token_counts) + validation_tokens
+
             status_placeholder.info("[5/5] Generating final report...")
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
             status_placeholder.success("🎉 Audit Complete!")
-            return final_report, report_filename, []
+            return final_report, report_filename, [], total_tokens
         
     except Exception as e:
-        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], 0
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
@@ -349,12 +368,11 @@ if __name__ == "__main__":
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
             with st.spinner("Executing audit..."):
-                final_report_md, report_filename, errors = run_audit_workflow(task_number, status_placeholder)
+                final_report_md, report_filename, errors, total_tokens = run_audit_workflow(task_number, status_placeholder)
             
             if errors:
                 st.error("The audit could not be completed:")
                 for error in errors:
-                    # Cleanly display the PermissionError without a traceback
                     if "PermissionError" in error.get('traceback', ''):
                          st.warning(error.get('message'))
                     else:
@@ -366,6 +384,7 @@ if __name__ == "__main__":
                         st.code(error.get('traceback', 'No traceback.'), language='text')
 
             elif final_report_md:
+                st.info(f"📊 **Total Tokens Used for this Audit:** {total_tokens:,}")
                 st.balloons()
                 st.header("Generated Review Content")
                 st.markdown(final_report_md)

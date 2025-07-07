@@ -9,19 +9,13 @@ import traceback
 import zipfile
 import google.generativeai as genai
 import streamlit as st
-import tempfile 
+import tempfile
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-# --- CONFIGURATION & MODELS ---
 load_dotenv()
-REVIEW_MODELS = [
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-]
+# The models are now defined by the batch they belong to.
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 
@@ -60,40 +54,19 @@ def find_and_unzip(zip_path, extract_folder):
                 return os.path.join(root, file)
     raise FileNotFoundError(f"No .ipynb file found in the extracted content of {zip_path}")
 
-# --- API CALL FUNCTION ---
 def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
-    """
-    Calls the Google Gemini API, using JSON Mode CONDITIONALLY for supported models.
-    """
     time.sleep(RATE_LIMIT)
-    safety_settings = {
-        'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-        'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-        'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-        'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
-    }
-
+    safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
+    
+    # Conditional JSON Mode for non-Flash models
     if "flash" in model:
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=8192
-        )
+        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=8192)
     else:
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=8192,
-            response_mime_type="application/json"
-        )
-
-    model_obj = genai.GenerativeModel(
-        model_name=model,
-        safety_settings=safety_settings,
-        generation_config=generation_config,
-        system_instruction=system_prompt
-    )
+        generation_config = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=8192, response_mime_type="application/json")
+    
+    model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
     response = model_obj.generate_content(prompt)
     return response.text
-
 
 def load_notebook_cells(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -122,7 +95,7 @@ def load_guidelines(guidelines_dir):
         if filename.endswith(".docx") and not filename.startswith("~$"):
             file_path = os.path.join(guidelines_dir, filename)
             doc = docx.Document(file_path)
-            guidelines[os.path.splitext(filename)[0]] = "\n".join(para.text for para in doc.paragraphs)
+            guidelines[os.path.splitext(filename)[0].lower()] = "\n".join(para.text for para in doc.paragraphs)
     return guidelines
 
 def extract_json_from_response(response_text):
@@ -131,46 +104,46 @@ def extract_json_from_response(response_text):
     elif response_text.strip().startswith("```"): response_text = response_text.strip()[3:-3]
     json_match = response_text[response_text.find('{'):response_text.rfind('}') + 1]
     if json_match: return json.loads(json_match)
-    raise ValueError(f"JSON Parsing Failed. The model may have returned conversational text instead of JSON. Raw Text: {response_text}")
+    raise ValueError(f"JSON Parsing Failed. Raw Text: {response_text}")
 
 # --- PROMPT ENGINEERING & REPORTING ---
-def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
-    return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a single, specific guideline.
-Your response MUST be a single, valid JSON object and NOTHING ELSE. Do not include conversational text, apologies, or any text outside the final JSON object.
+def build_batched_review_prompt(structured_notebook, guideline_batch):
+    guideline_names = list(guideline_batch.keys())
+    
+    combined_guideline_content = ""
+    for name, content in guideline_batch.items():
+        combined_guideline_content += f"--- Guideline: {name} ---\n{content}\n\n"
 
-**Your Sole Focus: The "{guideline_name}" Guideline**
----
-{guideline_content}
----
+    return f"""Your task is to act as a specialized AI auditor. You will analyze a Jupyter Notebook against a batch of guidelines simultaneously.
+Your response MUST be a single, valid JSON object and NOTHING ELSE.
+
+**Your Focus: The following guidelines: {', '.join(guideline_names)}**
+{combined_guideline_content}
 
 **Mandatory Instructions:**
-1.  Carefully analyze the entire notebook provided below.
-2.  For each violation of the `{guideline_name}` guideline, provide your step-by-step thinking process and a final, concise issue description.
-3.  **Crucially**: If you find NO violations of the guideline, you MUST return an empty `findings` array like this: `"findings": []`.
-4.  Your response MUST conform to the JSON schema specified in the examples. Do not add, remove, or change keys.
-5.  All strings within the JSON must have properly escaped characters (e.g., use `\\"` for a double quote).
+1.  Analyze the entire notebook provided below.
+2.  For each violation you find, you MUST identify which guideline was violated.
+3.  **Crucially**: Your JSON response MUST include a `violation_category` key for each finding, specifying the name of the guideline that was violated (e.g., "hallucination", "logical").
+4.  If you find NO violations for ANY of the provided guidelines, you MUST return an empty `findings` array.
+5.  Your response MUST conform to the JSON schema specified in the example.
 
-**Output Examples:**
-
-*Example 1: If you find violations*
+**Output Example:**
 ```json
 {{
-  "guideline": "{guideline_name}",
   "findings": [
     {{
+      "violation_category": "hallucination",
       "cell_number": 5,
-      "thinking_process": "The user asked for the capital of France. The model responded with \\"The capital of France is Berlin.\\". This is a clear factual error, also known as a hallucination.",
-      "issue_description": "In cell 5, the model incorrectly states that the capital of France is Berlin. The correct capital is Paris."
+      "thinking_process": "The user asked for the capital of France. The model responded with \\"The capital of France is Berlin.\\". This is a factual error under the hallucination guideline.",
+      "issue_description": "In cell 5, the model incorrectly states that the capital of France is Berlin."
+    }},
+    {{
+      "violation_category": "structure",
+      "cell_number": 8,
+      "thinking_process": "The code in cell 8 is poorly formatted and lacks comments, making it hard to understand. This violates the structure guideline.",
+      "issue_description": "The code in cell 8 should be formatted according to PEP 8 standards and include comments explaining its purpose."
     }}
   ]
-}}
-```
-
-*Example 2: If you find NO violations*
-```json
-{{
-  "guideline": "{guideline_name}",
-  "findings": []
 }}
 ```
 
@@ -183,25 +156,27 @@ Begin your analysis now. Your final output MUST BE the JSON object and nothing m
 """
 
 def build_validation_prompt(structured_notebook, all_findings):
-    # This is your original, unchanged validation prompt.
     return f"""As the Senior AI Audit Validator, your task is to review all preliminary findings from a team of specialized AI auditors, validate them, and compile a final, clean report.
+
 **Instructions:**
-1.  Review all findings provided below. Each finding is marked with its 'guideline' (e.g., 'Hallucination', 'logical').
+1.  Review all findings provided below. Each finding is marked with its 'violation_category' (e.g., 'hallucination', 'logical').
 2.  Validate each finding by cross-referencing it with the notebook structure and the auditor's thinking.
 3.  Eliminate duplicate findings and incorrect "false positives."
 4.  For each validated issue, provide a detailed explanation and your own validation reasoning.
-5.  **Crucially, for each issue, you must include the `violation_category`, which should be the name of the guideline that was violated.**
-6.  Organize all validated issues by their cell number.
-7.  Provide a concise, high-level summary of the notebook's overall quality.
-8.  Return your final validated report exclusively in a valid JSON format.
+5.  Organize all validated issues by their cell number.
+6.  Provide a concise, high-level summary of the notebook's overall quality.
+7.  Return your final validated report exclusively in a valid JSON format.
+
 **Notebook to Analyze:**
 ---
 {structured_notebook}
 ---
+
 **All Findings to Validate (with auditor's thinking):**
 ---
 {json.dumps(all_findings, indent=2)}
 ---
+
 **Required Output Format (JSON only):**
 ```json
 {{
@@ -210,7 +185,7 @@ def build_validation_prompt(structured_notebook, all_findings):
       "cell_number": <integer>,
       "validated_issues": [
         {{
-          "violation_category": "<The name of the guideline violated, e.g., 'Hallucination', 'logical', 'Structure'>",
+          "violation_category": "<The name of the guideline violated, e.g., 'hallucination', 'logical', 'structure'>",
           "problematic_content": "<Quote the exact problematic text or summarize the problematic action in the cell.>",
           "reason_for_violation": "<Explain exactly why this is a violation of the guidelines, referencing the specific rule if possible.>",
           "validation_reasoning": "<Explain your thought process for validating this issue. Did you agree with the initial auditor's thinking? Did you consolidate multiple findings? Explain why this is a confirmed violation.>"
@@ -223,7 +198,6 @@ def build_validation_prompt(structured_notebook, all_findings):
 ```"""
 
 def generate_final_report(validation_result, notebook_name):
-    # This is your original, unchanged reporting function.
     report = f"# Final Audit Report: {notebook_name}\n"
     report += f"**Generated at**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n\n"
     overall_feedback = validation_result.get("overall_feedback", "No overall feedback provided.")
@@ -248,38 +222,30 @@ def generate_final_report(validation_result, notebook_name):
     report += "\n*Report generated with a multi-model audit via Google Gemini.*"
     return report
 
-# --- WORKER FUNCTION (SILENT, RESILIENT, AND WITH ERROR CATCHING) ---
-def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content):
+# --- WORKER FUNCTION (ADAPTED FOR BATCHES) ---
+def run_batched_review_task(queue, structured_notebook, model_name, guideline_batch):
     try:
-        system_prompt = "You are a meticulous AI Notebook Auditor. Your task is to review a Jupyter Notebook against a specific guideline and return findings in a strict JSON format, following the examples provided in the user prompt."
-        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
+        guideline_names = list(guideline_batch.keys())
+        system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a batch of guidelines and return findings in a strict JSON format, tagging each finding with its violation category."
+        
+        prompt = build_batched_review_prompt(structured_notebook, guideline_batch)
         response = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
+        
         findings_data = extract_json_from_response(response)
         
-        if findings_data and "findings" not in findings_data:
-            queue.put([]) # Success with 0 findings
-        elif findings_data and "findings" in findings_data:
+        if findings_data and "findings" in findings_data:
             findings = findings_data.get("findings", [])
             for finding in findings:
-                finding["auditor"] = model_name
-                finding["guideline"] = guideline_name
+                finding["auditor_model"] = model_name # Tag the finding with the model used
             queue.put(findings)
         else:
-            raise ValueError("Response was not a valid JSON object or was empty.")
+            queue.put([]) # Assume no findings if key is missing or data is malformed
             
     except Exception as e:
-        error_details = {
-            "error": True,
-            "guideline": guideline_name,
-            "model": model_name,
-            "message": str(e),
-            "traceback": traceback.format_exc()
-        }
-        queue.put(error_details)
+        queue.put([{"error": True, "guideline": f"Batch: {', '.join(guideline_names)}", "model": model_name, "message": str(e), "traceback": traceback.format_exc()}])
 
-# --- MAIN WORKFLOW FUNCTION ---
+# --- MAIN WORKFLOW FUNCTION (MODIFIED FOR COST OPTIMIZATION) ---
 def run_audit_workflow(task_number, status_placeholder):
-    # --- FIX FOR PARALLEL RUNS: Use a temporary directory for each run ---
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
             status_placeholder.info("🚀 Audit initiated...")
@@ -287,59 +253,75 @@ def run_audit_workflow(task_number, status_placeholder):
             GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=GEMINI_API_KEY.strip())
 
-            status_placeholder.info(f"[1/7] Downloading notebook for task '{task_number}'...")
+            status_placeholder.info(f"[1/5] Downloading & Preprocessing...")
             notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
             downloader = DataDownloader(AUTH_TOKEN)
-            # Use the unique temporary directory for downloads
             zip_path = downloader.download_zip_file(notebook_zip_url, temp_dir)
-            status_placeholder.info("✅ Download complete.")
-            
-            status_placeholder.info(f"[2/7] Unzipping...")
-            # Use the unique temporary directory for extraction
             notebook_path = find_and_unzip(zip_path, temp_dir)
             notebook_name = os.path.basename(notebook_path)
-            status_placeholder.info(f"✅ Unzip complete. Found notebook: {notebook_name}")
-
-            status_placeholder.info("[3/7] Loading and preprocessing data...")
-            # Guidelines are part of the app, not temporary, so the path is correct.
-            guidelines = load_guidelines("./Guidlines")
             cells = load_notebook_cells(notebook_path)
             structured_notebook = preprocess_notebook(cells)
-            status_placeholder.info("✅ Data preprocessed.")
+            all_guidelines = load_guidelines("./Guidlines")
+            status_placeholder.info("✅ Download & Preprocessing Complete.")
 
-            status_placeholder.info(f"[4/7] Kicking off parallel reviews... (This may take several minutes)")
+            status_placeholder.info("[2/5] Setting up review batches...")
+            batches = [
+                {
+                    "model": "gemini-2.5-pro",
+                    "guidelines": {
+                        "hallucination": all_guidelines.get("hallucination", ""),
+                        "logical": all_guidelines.get("logical", "")
+                    }
+                },
+                {
+                    "model": "gemini-2.5-flash",
+                    "guidelines": {
+                        "thinking": all_guidelines.get("thinking", ""),
+                        "thought": all_guidelines.get("thought", "")
+                    }
+                },
+                {
+                    "model": "gemini-1.5-pro",
+                    "guidelines": {
+                        "tools": all_guidelines.get("tools", ""),
+                        "structure": all_guidelines.get("structure", "")
+                    }
+                }
+            ]
+            status_placeholder.info("✅ Batches configured.")
+
+            status_placeholder.info("[3/5] Kicking off batched parallel reviews...")
             all_findings, results_queue, threads = [], Queue(), []
-            for i, (guideline_name, guideline_content) in enumerate(guidelines.items()):
-                model = REVIEW_MODELS[i % len(REVIEW_MODELS)]
-                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, model, guideline_name, guideline_content))
+            for batch in batches:
+                thread = threading.Thread(target=run_batched_review_task, args=(results_queue, structured_notebook, batch["model"], batch["guidelines"]))
                 threads.append(thread); thread.start()
-                time.sleep(1)
+                time.sleep(1) # Stagger API calls
             for thread in threads: thread.join()
-            status_placeholder.info("✅ All review threads have finished.")
-            
+            status_placeholder.info("✅ All review threads finished.")
+
             errors_found = []
             while not results_queue.empty():
-                result = results_queue.get()
-                if isinstance(result, dict) and result.get("error"):
-                    errors_found.append(result)
-                else:
-                    all_findings.extend(result)
+                result_list = results_queue.get()
+                for result in result_list:
+                    if isinstance(result, dict) and result.get("error"):
+                        errors_found.append(result)
+                    else:
+                        all_findings.append(result)
             
             if errors_found:
                 return None, None, errors_found
 
-            status_placeholder.info(f"[5/7] Aggregated {len(all_findings)} findings.")
-            status_placeholder.info(f"[6/7] Running validation with {VALIDATION_MODEL}...")
+            status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
             if not all_findings:
-                validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
+                validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by any of the specialized auditors."}
             else:
                 validation_prompt = build_validation_prompt(structured_notebook, all_findings)
                 response = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
                 validation_result = extract_json_from_response(response) if response else None
                 if not validation_result:
-                     validation_result = {"final_report": [], "overall_feedback": "Validation step failed: Could not get a valid JSON response from the validation model."}
+                     validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
-            status_placeholder.info("[7/7] Generating final report...")
+            status_placeholder.info("[5/5] Generating final report...")
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
@@ -348,13 +330,12 @@ def run_audit_workflow(task_number, status_placeholder):
         
         except Exception as e:
             return None, None, [{"error": True, "guideline": "Main Workflow", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}]
-    # The temporary directory and its contents are automatically deleted when the 'with' block is exited.
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
     st.set_page_config(page_title="AI Notebook Auditor", layout="wide")
-    st.title("🤖 AI Notebook Auditor")
-    st.markdown("Enter a task number to perform a multi-model review.")
+    st.title("🤖 AI Notebook Auditor (Cost Optimized)")
+    st.markdown("Enter a task number to perform a batched, multi-model review.")
     
     task_number = st.text_input("Enter the Task Number:", placeholder="e.g., 214514")
 
@@ -362,7 +343,7 @@ if __name__ == "__main__":
         if task_number and task_number.isdigit():
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
-            with st.spinner("Executing full audit... This may take several minutes."):
+            with st.spinner("Executing cost-optimized audit..."):
                 final_report_md, report_filename, errors = run_audit_workflow(task_number, status_placeholder)
             
             if errors:

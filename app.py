@@ -1,4 +1,4 @@
-# app.py (Final High-Accuracy & Consistency Version - v6 with Tiered Optimization)
+# app.py (Final High-Accuracy & Consistency Version - v7 with Syntax Fix)
 import json
 import os
 import re 
@@ -308,8 +308,26 @@ def generate_final_report(validation_result, notebook_name):
 def run_review_task(queue, model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock):
     try:
         system_prompt = "You are a meticulous AI Notebook Auditor..."
-        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
         
+        temp_notebook_data = json.loads(structured_notebook)
+        
+        while True:
+            current_notebook_str = json.dumps(temp_notebook_data)
+            prompt = build_targeted_review_prompt(current_notebook_str, guideline_name, guideline_content)
+            
+            token_count = model_obj.count_tokens(prompt).total_tokens
+            
+            if token_count <= TOKEN_LIMIT:
+                if len(current_notebook_str) < len(structured_notebook):
+                    queue.put([{"warning": f"Input for '{guideline_name}' review was truncated to fit within the token limit."}])
+                break 
+            
+            if len(temp_notebook_data) > 1:
+                last_turn_key = sorted(temp_notebook_data.keys())[-1]
+                del temp_notebook_data[last_turn_key]
+            else:
+                raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
+
         response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model_obj=model_obj)
         
         with token_lock:
@@ -350,4 +368,157 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
 
             generation_config = genai.types.GenerationConfig(temperature=0.0, max_output_tokens=16384, response_mime_type="application/json")
             safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
-            review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=generation_config, safety_settings=saf
+            # --- FIX: Correctly close the parenthesis on both lines ---
+            review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=generation_config, safety_settings=safety_settings)
+            validation_model_obj = genai.GenerativeModel(VALIDATION_MODEL, generation_config=generation_config, safety_settings=safety_settings)
+
+            status_placeholder.info(f"[1/6] Downloading & Preprocessing...")
+            notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
+            downloader = DataDownloader(AUTH_TOKEN)
+            zip_path = downloader.download_zip_file(notebook_zip_url, temp_dir)
+            notebook_path = find_and_unzip(zip_path, temp_dir)
+            notebook_name = os.path.basename(notebook_path)
+            cells = load_notebook_cells(notebook_path)
+            structured_notebook = preprocess_notebook(cells)
+            all_guidelines = load_guidelines("./Guidlines")
+            status_placeholder.info("✅ Download & Preprocessing Complete.")
+
+            warnings_found = []
+            review_queue = list(all_guidelines.items())
+
+            longest_guideline_content = max(all_guidelines.values(), key=len) if all_guidelines else ""
+            worst_case_prompt = build_targeted_review_prompt(structured_notebook, "worst_case", longest_guideline_content)
+            worst_case_token_count = review_model_obj.count_tokens(worst_case_prompt).total_tokens
+
+            if worst_case_token_count > TOKEN_LIMIT:
+                status_placeholder.warning("⚠️ Large notebook detected. Attempting Tier 1 optimization...")
+                
+                original_len = len(review_queue)
+                review_queue = [item for item in review_queue if item[0] != 'structure']
+                
+                if len(review_queue) < original_len:
+                    warnings_found.append("Input is too large. The 'structure' guideline review was skipped to prioritize accuracy on other checks.")
+                    status_placeholder.info("✅ Tier 1 Optimization: Skipped 'structure' guideline.")
+                else:
+                    status_placeholder.info("Could not apply optimization ('structure' guideline not found).")
+
+            status_placeholder.info("[2/6] Kicking off individual parallel reviews...")
+            all_findings, results_queue = [], Queue()
+            threads, token_counts, token_lock = [], [], threading.Lock()
+            for guideline_name, guideline_content in review_queue:
+                status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
+                thread = threading.Thread(target=run_review_task, args=(results_queue, review_model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock))
+                threads.append(thread); thread.start()
+                time.sleep(1)
+            
+            for thread in threads: 
+                thread.join()
+            status_placeholder.info("✅ All review threads finished. Aggregating results...")
+
+            errors_found = []
+            while not results_queue.empty():
+                result_list = results_queue.get()
+                for result in result_list:
+                    if isinstance(result, dict) and result.get("error"):
+                        errors_found.append(result)
+                    elif isinstance(result, dict) and result.get("warning"):
+                        warnings_found.append(result.get("warning"))
+                    else:
+                        all_findings.append(result)
+            
+            if errors_found:
+                return None, None, errors_found, {}, []
+
+            status_placeholder.info(f"[3/6] Aggregated {len(all_findings)} findings.")
+            status_placeholder.info(f"[4/6] Running final validation with {VALIDATION_MODEL}...")
+            
+            validation_token_dict = {'input': 0, 'output': 0}
+            if not all_findings:
+                validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
+            else:
+                validation_prompt = build_validation_prompt(structured_notebook, all_findings)
+                response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model_obj=validation_model_obj)
+                validation_result = extract_json_from_response(response_text) if response_text else None
+                if not validation_result:
+                     validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
+            
+            total_input_tokens = sum(d['input'] for d in token_counts) + validation_token_dict['input']
+            total_output_tokens = sum(d['output'] for d in token_counts) + validation_token_dict['output']
+            grand_total = total_input_tokens + total_output_tokens
+
+            final_token_summary = {
+                'input': total_input_tokens,
+                'output': total_output_tokens,
+                'total': grand_total
+            }
+
+            status_placeholder.info("[5/6] Generating final report...")
+            final_report = generate_final_report(validation_result, notebook_name)
+            report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
+            
+            status_placeholder.info("[6/6] Logging audit results...")
+            cost_usd = ((total_input_tokens / 1_000_000) * PRICE_PER_MILLION_INPUT_TOKENS_USD) + \
+                       ((total_output_tokens / 1_000_000) * PRICE_PER_MILLION_OUTPUT_TOKENS_USD)
+            cost_inr = cost_usd * USD_TO_INR_EXCHANGE_RATE
+            
+            log_entry = {
+                "timestamp": datetime.now(),
+                "task_number": task_number,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "total_tokens": grand_total,
+                "estimated_cost_inr": cost_inr,
+                "warnings": warnings_found
+            }
+            log_audit_to_firestore(db_client, log_entry)
+            
+            status_placeholder.success("🎉 Audit Complete!")
+            return final_report, report_filename, [], final_token_summary, warnings_found
+        
+    except Exception as e:
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}, []
+
+# --- STREAMLIT UI ---
+if __name__ == "__main__":
+    st.set_page_config(page_title="AI Notebook Auditor", layout="wide")
+    st.title("🤖 AI Notebook Auditor")
+    st.markdown("Enter a task number to perform a multi-model review. Each task can be reviewed a maximum of two times.")
+    
+    db = initialize_firestore()
+
+    task_number = st.text_input("Enter the Task Number:", placeholder="e.g., 214514")
+
+    if st.button("Start Review", type="primary", use_container_width=True):
+        if db is None:
+            st.error("Firestore database is not connected. Please check your service account credentials.")
+        elif task_number and task_number.isdigit():
+            console_container = st.expander("Live Console Log", expanded=True)
+            status_placeholder = console_container.empty()
+            with st.spinner("Executing audit..."):
+                final_report_md, report_filename, errors, token_summary, warnings = run_audit_workflow(task_number, status_placeholder, db)
+            
+            if warnings:
+                for warning_msg in set(warnings):
+                    st.warning(f"⚠️ **Notice:** {warning_msg}")
+
+            if errors:
+                st.error("The audit could not be completed:")
+                for error in errors:
+                    if "PermissionError" in error.get('traceback', ''):
+                         st.warning(error.get('message'))
+                    else:
+                        if error.get('guideline') != 'Pre-flight Check':
+                            st.subheader(f"Error during: `{error.get('guideline', 'Unknown Step')}` review (Model: `{error.get('model', 'N/A')}`)")
+                        st.write("**Message:**")
+                        st.code(error.get('message', 'No message.'), language='text')
+                        st.write("**Full Traceback:**")
+                        st.code(error.get('traceback', 'No traceback.'), language='text')
+
+            elif final_report_md:
+                st.info(f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}**")
+                st.balloons()
+                st.header("Generated Review Content")
+                st.markdown(final_report_md)
+                st.download_button(label="⬇️ Download Full Report", data=final_report_md, file_name=report_filename, use_container_width=True)
+        else:
+            st.error("❗ Please enter a valid, numeric task number.")

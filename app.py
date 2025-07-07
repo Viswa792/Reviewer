@@ -1,4 +1,4 @@
-# app.py (Maximum Accuracy & Consistency Version - v4 with Higher Token Limit)
+# app.py (Final High-Accuracy & Consistency Version)
 import json
 import os
 import re 
@@ -16,20 +16,20 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION FOR MAXIMUM ACCURACY ---
 load_dotenv()
+# Use the most powerful model for all tasks to maximize accuracy and consistency.
 REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 COST_LOG_FILE = 'audit_log.csv'
 MAX_RUNS_PER_TASK = 2
-# Set a higher, safe token limit to maximize context while avoiding higher pricing tiers.
+# Set a high token limit to maximize context and only trim in extreme cases.
 TOKEN_LIMIT = 199000
 usage_lock = threading.Lock()
 
 # --- PRICING CONSTANTS FOR COST ESTIMATION ---
-# Based on high-end model pricing (e.g., GPT-4o, Gemini Advanced tiers)
 # These are estimates. Replace with your actual contract pricing if available.
 # Prices are per 1 million tokens.
 PRICE_PER_MILLION_INPUT_TOKENS_USD = 1.50 
@@ -77,15 +77,11 @@ def write_usage_tracker(data):
             json.dump(data, f, indent=4)
 
 def log_audit_to_csv(log_data):
-    """Appends a new record to the cost and usage log file."""
     with usage_lock:
         file_exists = os.path.isfile(COST_LOG_FILE)
         with open(COST_LOG_FILE, 'a', newline='') as f:
-            # Write header only if the file is new
             if not file_exists:
                 f.write("timestamp,task_number,input_tokens,output_tokens,total_tokens,estimated_cost_inr\n")
-            
-            # Write the data row
             f.write(f"{log_data['timestamp']},{log_data['task_number']},{log_data['input_tokens']},{log_data['output_tokens']},{log_data['total_tokens']},{log_data['estimated_cost_inr']:.4f}\n")
 
 # --- UTILITY AND LOGIC FUNCTIONS ---
@@ -102,18 +98,17 @@ def find_and_unzip(zip_path, extract_folder):
 def call_gemini_api(prompt, system_prompt=None, model_obj=None):
     time.sleep(RATE_LIMIT)
     
-    # Set a more reasonable timeout of 5 minutes (300 seconds)
     response = model_obj.generate_content(prompt, request_options={'timeout': 300})
     
     if not response.parts:
         try:
             finish_reason = response.candidates[0].finish_reason.name
             if finish_reason == "SAFETY":
-                raise ValueError("The model's response was blocked by safety filters. This can happen if the notebook contains sensitive content or code that is misinterpreted. The audit for this guideline cannot proceed.")
+                raise ValueError("The model's response was blocked by safety filters.")
             else:
                 raise ValueError(f"The model stopped generating text for an unexpected reason: {finish_reason}")
         except (IndexError, AttributeError):
-             raise ValueError("The model returned an empty response without a clear reason. This may be due to a content filter.")
+             raise ValueError("The model returned an empty response without a clear reason.")
 
     token_dict = {'input': 0, 'output': 0}
     try:

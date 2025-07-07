@@ -1,4 +1,4 @@
-# app.py (Maximum Accuracy & Consistency Version)
+# app.py (Final Version with Permanent Firestore Logging)
 import json
 import os
 import re 
@@ -11,19 +11,45 @@ import zipfile
 import google.generativeai as genai
 import streamlit as st
 import tempfile
+import firebase_admin
+from firebase_admin import credentials, firestore
 from queue import Queue
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from datetime import datetime
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION FOR MAXIMUM ACCURACY ---
 load_dotenv()
-# Use the most powerful model for all tasks to maximize accuracy and consistency.
 REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2
+TOKEN_LIMIT = 199000
 usage_lock = threading.Lock()
+
+# --- PRICING CONSTANTS FOR COST ESTIMATION ---
+PRICE_PER_MILLION_INPUT_TOKENS_USD = 1.50 
+PRICE_PER_MILLION_OUTPUT_TOKENS_USD = 7.50
+USD_TO_INR_EXCHANGE_RATE = 85.0 
+
+# --- FIRESTORE INITIALIZATION ---
+def initialize_firestore():
+    """Initializes the Firestore client if not already done."""
+    try:
+        # Check if the app is already initialized
+        firebase_admin.get_app()
+    except ValueError:
+        # If not initialized, do it now using Streamlit secrets
+        try:
+            # The service account key is stored as a JSON string in secrets
+            service_account_info = json.loads(st.secrets["FIREBASE_SERVICE_ACCOUNT"])
+            cred = credentials.Certificate(service_account_info)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Firebase initialization failed. Ensure your FIREBASE_SERVICE_ACCOUNT secret is set correctly. Error: {e}")
+            return None
+    return firestore.client()
 
 # --- DATA DOWNLOADER CLASS ---
 class DataDownloader:
@@ -65,6 +91,14 @@ def write_usage_tracker(data):
         with open(USAGE_TRACKER_FILE, 'w') as f:
             json.dump(data, f, indent=4)
 
+def log_audit_to_firestore(db_client, log_data):
+    """Adds a new document to the 'audit_logs' collection in Firestore."""
+    if db_client:
+        try:
+            db_client.collection('audit_logs').add(log_data)
+        except Exception as e:
+            st.warning(f"Could not write log to Firestore: {e}")
+
 # --- UTILITY AND LOGIC FUNCTIONS ---
 def find_and_unzip(zip_path, extract_folder):
     os.makedirs(extract_folder, exist_ok=True)
@@ -76,31 +110,20 @@ def find_and_unzip(zip_path, extract_folder):
                 return os.path.join(root, file)
     raise FileNotFoundError(f"No .ipynb file found in the extracted content of {zip_path}")
 
-def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
+def call_gemini_api(prompt, system_prompt=None, model_obj=None):
     time.sleep(RATE_LIMIT)
-    safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
     
-    new_token_limit = 16384
-    
-    # Set temperature to 0 for maximum consistency and determinism.
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.0, 
-        max_output_tokens=new_token_limit, 
-        response_mime_type="application/json"
-    )
-    
-    model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
-    response = model_obj.generate_content(prompt)
+    response = model_obj.generate_content(prompt, request_options={'timeout': 300})
     
     if not response.parts:
         try:
             finish_reason = response.candidates[0].finish_reason.name
             if finish_reason == "SAFETY":
-                raise ValueError("The model's response was blocked by safety filters. This can happen if the notebook contains sensitive content or code that is misinterpreted. The audit for this guideline cannot proceed.")
+                raise ValueError("The model's response was blocked by safety filters.")
             else:
                 raise ValueError(f"The model stopped generating text for an unexpected reason: {finish_reason}")
         except (IndexError, AttributeError):
-             raise ValueError("The model returned an empty response without a clear reason. This may be due to a content filter.")
+             raise ValueError("The model returned an empty response without a clear reason.")
 
     token_dict = {'input': 0, 'output': 0}
     try:
@@ -131,6 +154,7 @@ def preprocess_notebook(cells):
                 structured[f"turn_{turn_counter}"] = []
             structured[f"turn_{turn_counter}"].append({"cell_number": cell_num, "role": role, "content": source})
     return json.dumps(structured, indent=2)
+
 
 def load_guidelines(guidelines_dir):
     guidelines = {}
@@ -179,7 +203,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 **Mandatory Instructions:**
 1.  **Adopt a "Thinking Mode":** Before making any conclusion, you must think step-by-step.
 2.  **Analyze Carefully:** Review the entire notebook for violations of ONLY the guideline specified above.
-3.  **Mandatory Thinking Process:** For each violation, you MUST fill the `thinking_process` field with your detailed, step-by-step reasoning. Explain *why* you believe it's a violation based on the guideline.
+3.  **Mandatory Thinking Process:** For each violation, you MUST fill the `thinking_process` field with your detailed, step-by-step reasoning. Keep your reasoning clear but concise.
 4.  **Concise Issue Description:** After your thinking process, provide a clear and concise `issue_description`.
 5.  **No Violations:** If you find NO violations, you MUST return an empty `findings` array: `"findings": []`.
 6.  **Strict JSON:** Your entire output must be a single, valid JSON object. Do not include any conversational text.
@@ -285,11 +309,30 @@ def generate_final_report(validation_result, notebook_name):
     return report
 
 # --- WORKER FUNCTION (FOR INDIVIDUAL REVIEWS) ---
-def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content, token_counts, token_lock):
+def run_review_task(queue, model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock):
     try:
-        system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a specific guideline and return findings in a strict JSON format, following the examples provided in the user prompt."
-        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
-        response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
+        system_prompt = "You are a meticulous AI Notebook Auditor..."
+        
+        temp_notebook_data = json.loads(structured_notebook)
+        
+        while True:
+            current_notebook_str = json.dumps(temp_notebook_data)
+            prompt = build_targeted_review_prompt(current_notebook_str, guideline_name, guideline_content)
+            
+            token_count = model_obj.count_tokens(prompt).total_tokens
+            
+            if token_count <= TOKEN_LIMIT:
+                if len(current_notebook_str) < len(structured_notebook):
+                    queue.put([{"warning": f"Input for '{guideline_name}' review was truncated to fit within the token limit."}])
+                break 
+            
+            if len(temp_notebook_data) > 1:
+                last_turn_key = sorted(temp_notebook_data.keys())[-1]
+                del temp_notebook_data[last_turn_key]
+            else:
+                raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
+
+        response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model_obj=model_obj)
         
         with token_lock:
             token_counts.append(token_dict)
@@ -301,17 +344,17 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
         elif findings_data and "findings" in findings_data:
             findings = findings_data.get("findings", [])
             for finding in findings:
-                finding["auditor_model"] = model_name
+                finding["auditor_model"] = REVIEW_MODEL
                 finding["violation_category"] = guideline_name 
             queue.put(findings)
         else:
             raise ValueError("Response was not a valid JSON object or was empty.")
             
     except Exception as e:
-        queue.put([{"error": True, "guideline": guideline_name, "model": model_name, "message": str(e), "traceback": traceback.format_exc()}])
+        queue.put([{"error": True, "guideline": guideline_name, "model": REVIEW_MODEL, "message": str(e), "traceback": traceback.format_exc()}])
 
 # --- MAIN WORKFLOW FUNCTION ---
-def run_audit_workflow(task_number, status_placeholder):
+def run_audit_workflow(task_number, status_placeholder, db_client):
     try:
         usage_data = read_usage_tracker()
         run_count = usage_data.get(str(task_number), 0)
@@ -326,6 +369,11 @@ def run_audit_workflow(task_number, status_placeholder):
             AUTH_TOKEN = st.secrets["AUTH_TOKEN"]
             GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=GEMINI_API_KEY.strip())
+
+            generation_config = genai.types.GenerationConfig(temperature=0.0, max_output_tokens=16384, response_mime_type="application/json")
+            safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
+            review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=generation_config, safety_settings=safety_settings)
+            validation_model_obj = genai.GenerativeModel(VALIDATION_MODEL, generation_config=generation_config, safety_settings=safety_settings)
 
             status_placeholder.info(f"[1/5] Downloading & Preprocessing...")
             notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
@@ -343,25 +391,27 @@ def run_audit_workflow(task_number, status_placeholder):
             threads, token_counts, token_lock = [], [], threading.Lock()
             for guideline_name, guideline_content in all_guidelines.items():
                 status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
-                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, REVIEW_MODEL, guideline_name, guideline_content, token_counts, token_lock))
+                thread = threading.Thread(target=run_review_task, args=(results_queue, review_model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock))
                 threads.append(thread); thread.start()
                 time.sleep(1)
             
             for thread in threads: 
                 thread.join()
-            status_placeholder.info("✅ All review threads finished.")
+            status_placeholder.info("✅ All review threads finished. Aggregating results...")
 
-            errors_found = []
+            errors_found, warnings_found = [], []
             while not results_queue.empty():
                 result_list = results_queue.get()
                 for result in result_list:
                     if isinstance(result, dict) and result.get("error"):
                         errors_found.append(result)
+                    elif isinstance(result, dict) and result.get("warning"):
+                        warnings_found.append(result.get("warning"))
                     else:
                         all_findings.append(result)
             
             if errors_found:
-                return None, None, errors_found, {}
+                return None, None, errors_found, {}, []
 
             status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
             status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
@@ -371,7 +421,7 @@ def run_audit_workflow(task_number, status_placeholder):
                 validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
             else:
                 validation_prompt = build_validation_prompt(structured_notebook, all_findings)
-                response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
+                response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model_obj=validation_model_obj)
                 validation_result = extract_json_from_response(response_text) if response_text else None
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
@@ -390,11 +440,25 @@ def run_audit_workflow(task_number, status_placeholder):
             final_report = generate_final_report(validation_result, notebook_name)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
+            cost_usd = ((total_input_tokens / 1_000_000) * PRICE_PER_MILLION_INPUT_TOKENS_USD) + \
+                       ((total_output_tokens / 1_000_000) * PRICE_PER_MILLION_OUTPUT_TOKENS_USD)
+            cost_inr = cost_usd * USD_TO_INR_EXCHANGE_RATE
+            
+            log_entry = {
+                "timestamp": datetime.now(), # Firestore handles timestamps natively
+                "task_number": task_number,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "total_tokens": grand_total,
+                "estimated_cost_inr": cost_inr
+            }
+            log_audit_to_firestore(db_client, log_entry)
+            
             status_placeholder.success("🎉 Audit Complete!")
-            return final_report, report_filename, [], final_token_summary
+            return final_report, report_filename, [], final_token_summary, warnings_found
         
     except Exception as e:
-        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}, []
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
@@ -402,15 +466,24 @@ if __name__ == "__main__":
     st.title("🤖 AI Notebook Auditor")
     st.markdown("Enter a task number to perform a multi-model review. Each task can be reviewed a maximum of two times.")
     
+    # Initialize Firestore at the start of the app
+    db = initialize_firestore()
+
     task_number = st.text_input("Enter the Task Number:", placeholder="e.g., 214514")
 
     if st.button("Start Review", type="primary", use_container_width=True):
-        if task_number and task_number.isdigit():
+        if db is None:
+            st.error("Firestore database is not connected. Please check your service account credentials.")
+        elif task_number and task_number.isdigit():
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
             with st.spinner("Executing audit..."):
-                final_report_md, report_filename, errors, token_summary = run_audit_workflow(task_number, status_placeholder)
+                final_report_md, report_filename, errors, token_summary, warnings = run_audit_workflow(task_number, status_placeholder, db)
             
+            if warnings:
+                for warning_msg in set(warnings):
+                    st.warning(f"⚠️ **Notice:** {warning_msg}")
+
             if errors:
                 st.error("The audit could not be completed:")
                 for error in errors:

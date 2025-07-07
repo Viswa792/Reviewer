@@ -596,7 +596,6 @@ if __name__ == "__main__":
                 st.success("Audit complete!")
                 st.info(
                     f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}**\n\n"
-                    f"💰 **Estimated Cost:** ₹{total_cost_inr:.2f}"
                 )
                 st.balloons()
                 st.header("Generated Audit Report")

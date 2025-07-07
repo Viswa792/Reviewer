@@ -1,4 +1,4 @@
-# app.py (Maximum Accuracy & Consistency Version)
+# app.py (Maximum Accuracy & Consistency Version - with Token-Efficient Preprocessing)
 import json
 import os
 import re 
@@ -17,12 +17,12 @@ from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
 load_dotenv()
-# Use the most powerful model for all tasks to maximize accuracy and consistency.
 REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-pro"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2
+TOKEN_LIMIT = 190000
 usage_lock = threading.Lock()
 
 # --- DATA DOWNLOADER CLASS ---
@@ -76,21 +76,10 @@ def find_and_unzip(zip_path, extract_folder):
                 return os.path.join(root, file)
     raise FileNotFoundError(f"No .ipynb file found in the extracted content of {zip_path}")
 
-def call_gemini_api(prompt, system_prompt=None, model=VALIDATION_MODEL):
+def call_gemini_api(prompt, system_prompt=None, model_obj=None):
     time.sleep(RATE_LIMIT)
-    safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
     
-    new_token_limit = 16384
-    
-    # Set temperature to 0 for maximum consistency and determinism.
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.0, 
-        max_output_tokens=new_token_limit, 
-        response_mime_type="application/json"
-    )
-    
-    model_obj = genai.GenerativeModel(model_name=model, safety_settings=safety_settings, generation_config=generation_config, system_instruction=system_prompt)
-    response = model_obj.generate_content(prompt)
+    response = model_obj.generate_content(prompt, request_options={'timeout': 600})
     
     if not response.parts:
         try:
@@ -115,22 +104,45 @@ def load_notebook_cells(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f).get('cells', [])
 
+# --- TOKEN-EFFICIENT PREPROCESSING ---
 def preprocess_notebook(cells):
-    structured, turn_counter = {}, 0
+    """
+    Converts notebook cells into a token-efficient list of dictionaries,
+    removing repetitive keys like 'turn_x' and 'cell_number'.
+    """
+    processed_list = []
+    # Mapping from your specific roles to more generic, token-friendly names
+    role_map = {
+        "user_query": "user",
+        "assistant_response": "assistant",
+        "assistant_thinking": "assistant_thinking",
+        "assistant_thought": "assistant_thought",
+        "tool_code": "tool_code",
+        "tool_output": "tool_output",
+        "tool_definitions": "tool_definitions",
+        "system_prompt": "system"
+    }
+    
     for i, cell in enumerate(cells):
-        source, cell_num, role = "".join(cell.get('source', [])), i + 1, "unknown"
-        markers = {"**[system]**": "system_prompt", "**[user]**": "user_query", "**[assistant]**": "assistant_response", "**[thinking]**": "assistant_thinking", "**[thought]**": "assistant_thought", "**[tool_use]**": "tool_code", "**[tool_output]**": "tool_output", "**[tools]**": "tool_definitions"}
-        for marker, r in markers.items():
-            if marker in source: role = r; break
-        if role == "user_query":
-            turn_counter += 1
-            structured[f"turn_{turn_counter}"] = []
+        source = "".join(cell.get('source', []))
+        role = "unknown"
+        
+        # Determine the role based on markers
+        for marker, mapped_role in role_map.items():
+            if marker in source:
+                role = mapped_role
+                break
+        
+        # Only include cells that have a recognized role
         if role != "unknown":
-            if f"turn_{turn_counter}" not in structured:
-                if turn_counter == 0: turn_counter = 1
-                structured[f"turn_{turn_counter}"] = []
-            structured[f"turn_{turn_counter}"].append({"cell_number": cell_num, "role": role, "content": source})
-    return json.dumps(structured, indent=2)
+            processed_list.append({
+                "cell": i + 1, # Keep cell number for reference inside the object
+                "role": role,
+                "content": source
+            })
+            
+    return json.dumps(processed_list, indent=2)
+
 
 def load_guidelines(guidelines_dir):
     guidelines = {}
@@ -169,6 +181,7 @@ def extract_json_from_response(response_text):
 
 # --- PROMPT ENGINEERING & REPORTING ---
 def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content):
+    # This prompt is updated to reflect the new, more efficient notebook structure.
     return f"""Your task is to act as a specialized AI auditor operating in a "Chain of Thought" mode. For every potential violation you identify, you MUST first articulate your step-by-step reasoning in the `thinking_process` field before summarizing the issue. Your response must be a single, valid JSON object and NOTHING ELSE.
 
 **Your Sole Focus: The "{guideline_name}" Guideline**
@@ -178,7 +191,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 
 **Mandatory Instructions:**
 1.  **Adopt a "Thinking Mode":** Before making any conclusion, you must think step-by-step.
-2.  **Analyze Carefully:** Review the entire notebook for violations of ONLY the guideline specified above.
+2.  **Analyze Carefully:** Review the entire notebook for violations of ONLY the guideline specified above. The notebook is provided as a list of cell objects.
 3.  **Mandatory Thinking Process:** For each violation, you MUST fill the `thinking_process` field with your detailed, step-by-step reasoning. Explain *why* you believe it's a violation based on the guideline.
 4.  **Concise Issue Description:** After your thinking process, provide a clear and concise `issue_description`.
 5.  **No Violations:** If you find NO violations, you MUST return an empty `findings` array: `"findings": []`.
@@ -213,7 +226,7 @@ def build_targeted_review_prompt(structured_notebook, guideline_name, guideline_
 }}
 ```
 
-**Notebook to Analyze:**
+**Notebook to Analyze (as a list of cell objects):**
 ---
 {structured_notebook}
 ---
@@ -231,7 +244,7 @@ def build_validation_prompt(structured_notebook, all_findings):
 5.  Organize all validated issues by their cell number.
 6.  Provide a concise, high-level summary of the notebook's overall quality.
 7.  Return your final validated report exclusively in a valid JSON format.
-**Notebook to Analyze:**
+**Notebook to Analyze (as a list of cell objects):**
 ---
 {structured_notebook}
 ---
@@ -285,11 +298,29 @@ def generate_final_report(validation_result, notebook_name):
     return report
 
 # --- WORKER FUNCTION (FOR INDIVIDUAL REVIEWS) ---
-def run_review_task(queue, structured_notebook, model_name, guideline_name, guideline_content, token_counts, token_lock):
+def run_review_task(queue, model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock):
     try:
-        system_prompt = "You are a meticulous AI Notebook Auditor. You will review a Jupyter Notebook against a specific guideline and return findings in a strict JSON format, following the examples provided in the user prompt."
-        prompt = build_targeted_review_prompt(structured_notebook, guideline_name, guideline_content)
-        response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model=model_name)
+        system_prompt = "You are a meticulous AI Notebook Auditor..."
+        
+        temp_notebook_data = json.loads(structured_notebook)
+        
+        while True:
+            current_notebook_str = json.dumps(temp_notebook_data)
+            prompt = build_targeted_review_prompt(current_notebook_str, guideline_name, guideline_content)
+            
+            token_count = model_obj.count_tokens(prompt).total_tokens
+            
+            if token_count <= TOKEN_LIMIT:
+                if len(temp_notebook_data) < len(json.loads(structured_notebook)):
+                    queue.put([{"warning": f"Input for '{guideline_name}' review was truncated to fit within the token limit."}])
+                break 
+            
+            if len(temp_notebook_data) > 1:
+                temp_notebook_data.pop() # Remove the last cell from the list
+            else:
+                raise ValueError(f"Prompt for '{guideline_name}' is too large to process even after maximum truncation.")
+
+        response_text, token_dict = call_gemini_api(prompt, system_prompt=system_prompt, model_obj=model_obj)
         
         with token_lock:
             token_counts.append(token_dict)
@@ -301,14 +332,14 @@ def run_review_task(queue, structured_notebook, model_name, guideline_name, guid
         elif findings_data and "findings" in findings_data:
             findings = findings_data.get("findings", [])
             for finding in findings:
-                finding["auditor_model"] = model_name
+                finding["auditor_model"] = REVIEW_MODEL
                 finding["violation_category"] = guideline_name 
             queue.put(findings)
         else:
             raise ValueError("Response was not a valid JSON object or was empty.")
             
     except Exception as e:
-        queue.put([{"error": True, "guideline": guideline_name, "model": model_name, "message": str(e), "traceback": traceback.format_exc()}])
+        queue.put([{"error": True, "guideline": guideline_name, "model": REVIEW_MODEL, "message": str(e), "traceback": traceback.format_exc()}])
 
 # --- MAIN WORKFLOW FUNCTION ---
 def run_audit_workflow(task_number, status_placeholder):
@@ -327,6 +358,11 @@ def run_audit_workflow(task_number, status_placeholder):
             GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=GEMINI_API_KEY.strip())
 
+            generation_config = genai.types.GenerationConfig(temperature=0.0, max_output_tokens=16384, response_mime_type="application/json")
+            safety_settings = {'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE','HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE','HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE','HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'}
+            review_model_obj = genai.GenerativeModel(REVIEW_MODEL, generation_config=generation_config, safety_settings=safety_settings)
+            validation_model_obj = genai.GenerativeModel(VALIDATION_MODEL, generation_config=generation_config, safety_settings=safety_settings)
+
             status_placeholder.info(f"[1/5] Downloading & Preprocessing...")
             notebook_zip_url = f"https://labeling-s.turing.com/api/conversations/download-notebook-zip?ids[]={task_number}"
             downloader = DataDownloader(AUTH_TOKEN)
@@ -343,7 +379,7 @@ def run_audit_workflow(task_number, status_placeholder):
             threads, token_counts, token_lock = [], [], threading.Lock()
             for guideline_name, guideline_content in all_guidelines.items():
                 status_placeholder.info(f"   - Dispatching '{guideline_name}' review to {REVIEW_MODEL}...")
-                thread = threading.Thread(target=run_review_task, args=(results_queue, structured_notebook, REVIEW_MODEL, guideline_name, guideline_content, token_counts, token_lock))
+                thread = threading.Thread(target=run_review_task, args=(results_queue, review_model_obj, guideline_name, guideline_content, structured_notebook, token_counts, token_lock))
                 threads.append(thread); thread.start()
                 time.sleep(1)
             
@@ -351,17 +387,19 @@ def run_audit_workflow(task_number, status_placeholder):
                 thread.join()
             status_placeholder.info("✅ All review threads finished.")
 
-            errors_found = []
+            errors_found, warnings_found = [], []
             while not results_queue.empty():
                 result_list = results_queue.get()
                 for result in result_list:
                     if isinstance(result, dict) and result.get("error"):
                         errors_found.append(result)
+                    elif isinstance(result, dict) and result.get("warning"):
+                        warnings_found.append(result.get("warning"))
                     else:
                         all_findings.append(result)
             
             if errors_found:
-                return None, None, errors_found, {}
+                return None, None, errors_found, {}, []
 
             status_placeholder.info(f"[3/5] Aggregated {len(all_findings)} findings.")
             status_placeholder.info(f"[4/5] Running final validation with {VALIDATION_MODEL}...")
@@ -371,7 +409,7 @@ def run_audit_workflow(task_number, status_placeholder):
                 validation_result = {"final_report": [], "overall_feedback": "Excellent! No issues were found by the specialized auditors."}
             else:
                 validation_prompt = build_validation_prompt(structured_notebook, all_findings)
-                response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model=VALIDATION_MODEL)
+                response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model_obj=validation_model_obj)
                 validation_result = extract_json_from_response(response_text) if response_text else None
                 if not validation_result:
                      validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
@@ -391,10 +429,10 @@ def run_audit_workflow(task_number, status_placeholder):
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
             status_placeholder.success("🎉 Audit Complete!")
-            return final_report, report_filename, [], final_token_summary
+            return final_report, report_filename, [], final_token_summary, warnings_found
         
     except Exception as e:
-        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}
+        return None, None, [{"error": True, "guideline": "Pre-flight Check", "model": "N/A", "message": str(e), "traceback": traceback.format_exc()}], {}, []
 
 # --- STREAMLIT UI ---
 if __name__ == "__main__":
@@ -409,8 +447,12 @@ if __name__ == "__main__":
             console_container = st.expander("Live Console Log", expanded=True)
             status_placeholder = console_container.empty()
             with st.spinner("Executing audit..."):
-                final_report_md, report_filename, errors, token_summary = run_audit_workflow(task_number, status_placeholder)
+                final_report_md, report_filename, errors, token_summary, warnings = run_audit_workflow(task_number, status_placeholder)
             
+            if warnings:
+                for warning_msg in set(warnings):
+                    st.warning(f"⚠️ **Notice:** {warning_msg}")
+
             if errors:
                 st.error("The audit could not be completed:")
                 for error in errors:

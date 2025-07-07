@@ -216,30 +216,50 @@ def load_guidelines(guidelines_dir):
 
 
 def extract_json_from_response(response_text):
-    if not response_text: raise ValueError("API response was empty.")
+    if not response_text:
+        raise ValueError("API response was empty.")
 
     # Clean the response text to extract only the JSON part
-    if response_text.strip().startswith("```json"):
-        response_text = response_text.strip()[7:-3]
-    elif response_text.strip().startswith("```"):
-        response_text = response_text.strip()[3:-3]
+    # This also handles cases where the model might output ```json or ``` at the start/end
+    cleaned_text = response_text.strip()
+    if cleaned_text.startswith("```json"):
+        cleaned_text = cleaned_text[7:].strip()
+        if cleaned_text.endswith("```"):
+            cleaned_text = cleaned_text[:-3].strip()
+    elif cleaned_text.startswith("```"):
+        cleaned_text = cleaned_text[3:].strip()
+        if cleaned_text.endswith("```"):
+            cleaned_text = cleaned_text[:-3].strip()
 
-    json_match = response_text[response_text.find('{'):response_text.rfind('}') + 1]
+    # Find the outermost JSON object/array
+    json_match = cleaned_text[cleaned_text.find('{'):cleaned_text.rfind('}') + 1]
+    if not json_match:
+        # Also check for array as root
+        json_match = cleaned_text[cleaned_text.find('['):cleaned_text.rfind(']') + 1]
+
 
     if json_match:
         try:
             return json.loads(json_match)
         except json.JSONDecodeError as e:
-            # Attempt to fix common JSON errors, like missing commas between objects
-            if "Expecting ',' delimiter" in str(e):
-                fixed_json_match = re.sub(r'\}\s*\{', '}, {', json_match)
+            # Attempt to fix common JSON errors, like missing commas between objects in an array
+            # This regex specifically targets cases like "}{" and replaces with "},{"
+            fixed_json_match = re.sub(r'(?<=\})\s*(?=\{)', ',', json_match)
+            try:
+                return json.loads(fixed_json_match)
+            except json.JSONDecodeError:
+                # If the above fix doesn't work, try a more general approach for missing commas within arrays
+                # This is a bit more aggressive and assumes the structure is mostly correct,
+                # but just lacks commas where objects end and new ones begin in a list.
+                fixed_json_match_alt = re.sub(r'\}\s*,\s*\{', '},{', fixed_json_match) # Remove extra commas
+                fixed_json_match_alt = re.sub(r'\}\s*\{', '},{', fixed_json_match_alt) # Add missing commas between objects
                 try:
-                    return json.loads(fixed_json_match)
+                    return json.loads(fixed_json_match_alt)
                 except json.JSONDecodeError:
                     raise ValueError(f"JSON auto-correction failed. Original Error: {e}. Raw Text: {response_text}")
-            else:
-                raise ValueError(f"JSON Parsing Failed with a non-comma error. Raw Text: {response_text}")
-
+            else: # If the first fix worked
+                return json.loads(fixed_json_match) # Return the result of the first fix
+    
     raise ValueError(f"Could not find a valid JSON object in the response. Raw Text: {response_text}")
 
 
@@ -379,7 +399,7 @@ def generate_final_report(validation_result, notebook_name, cell_role_map):
                 report += header + "\n\n"
 
                 for issue in issues:
-                    report += f"**Violation Category:** {issue.get('violation_category', 'N/A')}\n\n"
+                    report += f"**Violation Category:** {issue.get('viulation_category', 'N/A')}\n\n"
                     report += f"**Problematic Content:**\n```\n{issue.get('problematic_content', 'N/A')}\n```\n\n"
                     report += f"**Reason for Violation:**\n{issue.get('reason_for_violation', 'N/A')}\n\n"
                     report += f"**Validator's Reasoning:**\n*_{issue.get('validation_reasoning', 'N/A')}_*\n\n"
@@ -600,3 +620,4 @@ if __name__ == "__main__":
                                    use_container_width=True)
         else:
             st.error("❗ Please enter a valid, numeric task number.")
+

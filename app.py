@@ -1,6 +1,6 @@
 import json
 import os
-import re 
+import re
 import requests
 import time
 import docx
@@ -19,22 +19,22 @@ from datetime import datetime
 
 # --- CONFIGURATION FOR MAXIMUM ACCURACY ---
 load_dotenv()
-REVIEW_MODEL = "gemini-2.5-pro"
-VALIDATION_MODEL = "gemini-2.5-flash"
+REVIEW_MODEL = "gemini-1.5-pro"
+VALIDATION_MODEL = "gemini-1.5-flash"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
 MAX_RUNS_PER_TASK = 2
 usage_lock = threading.Lock()
 
-USD_TO_INR_EXCHANGE_RATE = 85.0 
+USD_TO_INR_EXCHANGE_RATE = 85.0
 # Prices are per 1 million tokens.
-GEMINI_2_5_PRO_PRICING = {
-    "low_tier": {"input": 1.25, "output": 10.00, "threshold": 200000},
-    "high_tier": {"input": 2.50, "output": 15.00}
+GEMINI_1_5_PRO_PRICING = {
+    "input": 3.50, 
+    "output": 10.50
 }
-GEMINI_2_5_FLASH_PRICING = {
-    "input": 0.30, 
-    "output": 2.50
+GEMINI_1_5_FLASH_PRICING = {
+    "input": 0.35, 
+    "output": 1.05
 }
 
 # --- FIRESTORE INITIALIZATION ---
@@ -43,6 +43,7 @@ def initialize_firestore():
         firebase_admin.get_app()
     except ValueError:
         try:
+            # Load credentials from Streamlit secrets
             service_account_info = json.loads(st.secrets["FIREBASE_SERVICE_ACCOUNT"])
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
@@ -100,14 +101,13 @@ def log_audit_to_firestore(db_client, log_data):
 def calculate_cost_inr(model_name, input_tokens, output_tokens):
     """Calculates the cost in INR based on the specific model and its pricing tiers."""
     cost_usd = 0.0
-    if "2.5-pro" in model_name:
-        pricing = GEMINI_2_5_PRO_PRICING
-        tier = "low_tier" if input_tokens <= pricing["low_tier"]["threshold"] else "high_tier"
-        input_cost_usd = (input_tokens / 1_000_000) * pricing[tier]["input"]
-        output_cost_usd = (output_tokens / 1_000_000) * pricing[tier]["output"]
+    if "1.5-pro" in model_name:
+        pricing = GEMINI_1_5_PRO_PRICING
+        input_cost_usd = (input_tokens / 1_000_000) * pricing["input"]
+        output_cost_usd = (output_tokens / 1_000_000) * pricing["output"]
         cost_usd = input_cost_usd + output_cost_usd
-    elif "2.5-flash" in model_name:
-        pricing = GEMINI_2_5_FLASH_PRICING
+    elif "1.5-flash" in model_name:
+        pricing = GEMINI_1_5_FLASH_PRICING
         input_cost_usd = (input_tokens / 1_000_000) * pricing["input"]
         output_cost_usd = (output_tokens / 1_000_000) * pricing["output"]
         cost_usd = input_cost_usd + output_cost_usd
@@ -138,7 +138,7 @@ def call_gemini_api(prompt, system_prompt=None, model_obj=None):
             else:
                 raise ValueError(f"The model stopped generating text for an unexpected reason: {finish_reason}")
         except (IndexError, AttributeError):
-             raise ValueError("The model returned an empty response without a clear reason.")
+                raise ValueError("The model returned an empty response without a clear reason.")
 
     token_dict = {'input': 0, 'output': 0}
     try:
@@ -154,12 +154,24 @@ def load_notebook_cells(file_path):
         return json.load(f).get('cells', [])
 
 def preprocess_notebook(cells):
+    """
+    Processes notebook cells to create a structured JSON for the AI and a role map for the final report.
+    Returns:
+        - A JSON string representing the structured notebook for AI analysis.
+        - A dictionary mapping each cell number to its identified role (e.g., 'assistant_response').
+    """
     structured, turn_counter = {}, 0
+    cell_role_map = {}  # Map to store role for each cell number
     for i, cell in enumerate(cells):
         source, cell_num, role = "".join(cell.get('source', [])), i + 1, "unknown"
         markers = {"**[system]**": "system_prompt", "**[user]**": "user_query", "**[assistant]**": "assistant_response", "**[thinking]**": "assistant_thinking", "**[thought]**": "assistant_thought", "**[tool_use]**": "tool_code", "**[tool_output]**": "tool_output", "**[tools]**": "tool_definitions"}
         for marker, r in markers.items():
-            if marker in source: role = r; break
+            if marker in source: 
+                role = r
+                break
+        
+        cell_role_map[cell_num] = role # Store the role for the final report
+
         if role == "user_query":
             turn_counter += 1
             structured[f"turn_{turn_counter}"] = []
@@ -168,7 +180,8 @@ def preprocess_notebook(cells):
                 if turn_counter == 0: turn_counter = 1
                 structured[f"turn_{turn_counter}"] = []
             structured[f"turn_{turn_counter}"].append({"cell_number": cell_num, "role": role, "content": source})
-    return json.dumps(structured, indent=2)
+            
+    return json.dumps(structured, indent=2), cell_role_map
 
 
 def load_guidelines(guidelines_dir):
@@ -183,6 +196,7 @@ def load_guidelines(guidelines_dir):
 def extract_json_from_response(response_text):
     if not response_text: raise ValueError("API response was empty.")
     
+    # Clean the response text to extract only the JSON part
     if response_text.strip().startswith("```json"):
         response_text = response_text.strip()[7:-3]
     elif response_text.strip().startswith("```"):
@@ -194,6 +208,7 @@ def extract_json_from_response(response_text):
         try:
             return json.loads(json_match)
         except json.JSONDecodeError as e:
+            # Attempt to fix common JSON errors, like missing commas between objects
             if "Expecting ',' delimiter" in str(e):
                 fixed_json_match = re.sub(r'\}\s*\{', '}, {', json_match)
                 try:
@@ -298,7 +313,10 @@ def build_validation_prompt(structured_notebook, all_findings):
 }}
 ```"""
 
-def generate_final_report(validation_result, notebook_name):
+def generate_final_report(validation_result, notebook_name, cell_role_map):
+    """
+    Generates a markdown report from the validation results, including the cell type.
+    """
     report = f"# Final Audit Report: {notebook_name}\n"
     report += f"**Generated at**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n\n"
     overall_feedback = validation_result.get("overall_feedback", "No overall feedback provided.")
@@ -308,12 +326,30 @@ def generate_final_report(validation_result, notebook_name):
     if not final_report_data:
         report += "✅ No validated issues found in the final report.\n"
     else:
+        # A map to format the role names for the report header
+        display_role_map = {
+            "system_prompt": "[system]",
+            "user_query": "[user]",
+            "assistant_response": "[assistant]",
+            "assistant_thinking": "[thinking]",
+            "assistant_thought": "[thought]",
+            "tool_code": "[tool]",
+            "tool_output": "[tool_output]",
+            "tool_definitions": "[tools]",
+            "unknown": "[unknown]"
+        }
         sorted_report_data = sorted(final_report_data, key=lambda x: x.get("cell_number", float('inf')))
         for cell_data in sorted_report_data:
             cell_num = cell_data.get("cell_number", "N/A")
             issues = cell_data.get("validated_issues", [])
             if issues:
-                report += f"### Cell {cell_num}\n"
+                # Look up the role from the map created during preprocessing
+                role = cell_role_map.get(cell_num, 'unknown')
+                display_role = display_role_map.get(role, f"[{role}]") # Fallback for safety
+                
+                # Add the cell type to the header
+                report += f"### Cell {cell_num} {display_role}\n"
+                
                 for issue in issues:
                     report += f"**Violation Category:** {issue.get('violation_category', 'N/A')}\n\n"
                     report += f"**Problematic Content:**\n```\n{issue.get('problematic_content', 'N/A')}\n```\n\n"
@@ -381,7 +417,10 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             notebook_path = find_and_unzip(zip_path, temp_dir)
             notebook_name = os.path.basename(notebook_path)
             cells = load_notebook_cells(notebook_path)
-            structured_notebook = preprocess_notebook(cells)
+            
+            # Get both the structured notebook and the cell-to-role map
+            structured_notebook, cell_role_map = preprocess_notebook(cells)
+            
             all_guidelines = load_guidelines("./Guidelines")
             status_placeholder.info("✅ Download & Preprocessing Complete.")
 
@@ -421,7 +460,7 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
                 response_text, validation_token_dict = call_gemini_api(prompt=validation_prompt, system_prompt="You are the Senior AI Audit Validator...", model_obj=validation_model_obj)
                 validation_result = extract_json_from_response(response_text) if response_text else None
                 if not validation_result:
-                     validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
+                        validation_result = {"final_report": [], "overall_feedback": "Validation step failed."}
             
             total_input_tokens = 0
             total_output_tokens = 0
@@ -445,7 +484,8 @@ def run_audit_workflow(task_number, status_placeholder, db_client):
             }
 
             status_placeholder.info("[5/5] Generating final report...")
-            final_report = generate_final_report(validation_result, notebook_name)
+            # Pass the cell_role_map to the report generator
+            final_report = generate_final_report(validation_result, notebook_name, cell_role_map)
             report_filename = f"FINAL_AUDIT_REPORT_{notebook_name.replace('.ipynb', '')}.md"
             
             log_entry = {
@@ -491,7 +531,7 @@ if __name__ == "__main__":
                 st.error("The audit could not be completed:")
                 for error in errors:
                     if "PermissionError" in error.get('traceback', ''):
-                         st.warning(error.get('message'))
+                            st.warning(error.get('message'))
                     else:
                         if error.get('guideline') != 'Pre-flight Check':
                             st.subheader(f"Error during: `{error.get('guideline', 'Unknown Step')}` review (Model: `{error.get('model', 'N/A')}`)")
@@ -501,7 +541,7 @@ if __name__ == "__main__":
                         st.code(error.get('traceback', 'No traceback.'), language='text')
 
             elif final_report_md:
-                st.info(f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}**")
+                st.info(f"📊 **Token Usage:** Input: {token_summary.get('input', 0):,} | Output: {token_summary.get('output', 0):,} | **Total: {token_summary.get('total', 0):,}** | **Est. Cost: ₹{total_cost_inr:,.2f}**")
                 st.balloons()
                 st.header("Generated Review Content")
                 st.markdown(final_report_md)

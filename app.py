@@ -23,7 +23,7 @@ REVIEW_MODEL = "gemini-2.5-pro"
 VALIDATION_MODEL = "gemini-2.5-flash"
 RATE_LIMIT = 5
 USAGE_TRACKER_FILE = 'usage_tracker.json'
-MAX_RUNS_PER_TASK = 3
+MAX_RUNS_PER_TASK = 2
 usage_lock = threading.Lock()
 
 USD_TO_INR_EXCHANGE_RATE = 85.0

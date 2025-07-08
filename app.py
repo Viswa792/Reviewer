@@ -28,7 +28,6 @@ usage_lock = threading.Lock()
 
 USD_TO_INR_EXCHANGE_RATE = 85.0
 # Prices are per 1 million tokens.
-# Restored the tiered pricing for the Pro model
 GEMINI_PRO_PRICING = {
     "low_tier": {"input": 1.25, "output": 10.00, "threshold": 200000},
     "high_tier": {"input": 2.50, "output": 15.00}
@@ -43,7 +42,6 @@ GEMINI_FLASH_PRICING = {
 def initialize_firestore():
     """Initializes and returns a Firestore client, handling potential errors."""
     try:
-        # Check if the app is already initialized
         firebase_admin.get_app()
     except ValueError:
         try:
@@ -124,10 +122,8 @@ def log_audit_to_firestore(db_client, log_data):
 def calculate_cost_inr(model_name, input_tokens, output_tokens):
     """Calculates the cost in INR based on the specific model and its pricing tiers."""
     cost_usd = 0.0
-    # Updated logic to handle tiered pricing for the Pro model
     if "pro" in model_name:
         pricing = GEMINI_PRO_PRICING
-        # Determine pricing tier based on input token count
         tier = "low_tier" if input_tokens <= pricing["low_tier"]["threshold"] else "high_tier"
         input_cost_usd = (input_tokens / 1_000_000) * pricing[tier]["input"]
         output_cost_usd = (output_tokens / 1_000_000) * pricing[tier]["output"]
@@ -147,7 +143,6 @@ def find_and_unzip(zip_path, extract_folder):
     os.makedirs(extract_folder, exist_ok=True)
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_folder)
-    # Walk through the extracted files to find the notebook
     for root, _, files in os.walk(extract_folder):
         for file in files:
             if file.endswith(".ipynb"):
@@ -179,7 +174,6 @@ def call_gemini_api(prompt, model_obj):
         token_dict['input'] = response.usage_metadata.prompt_token_count
         token_dict['output'] = response.usage_metadata.candidates_token_count
     except Exception:
-        # If token count isn't available, we'll just use 0
         pass
 
     return response.text, token_dict
@@ -275,10 +269,8 @@ def extract_json_from_response(response_text):
     try:
         return json.loads(json_match)
     except json.JSONDecodeError as e:
-        # Attempt to fix common JSON errors like missing commas
-        # This regex inserts a comma between closing and opening curly braces
+       
         fixed_json_match = re.sub(r'(?<=\})\s*(?=\{)', ',', json_match)
-        # This regex removes trailing commas before a closing bracket or brace
         fixed_json_match = re.sub(r',\s*([\]}])', r'\1', fixed_json_match)
         try:
             return json.loads(fixed_json_match)
